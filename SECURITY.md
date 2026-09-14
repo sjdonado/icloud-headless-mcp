@@ -24,7 +24,7 @@ This is a prerequisite, not a hardening step, and it comes before you start the 
 
 The first-time login is an interactive session: a remote desktop onto a browser on a headless machine, into which you type an Apple ID, a password and a two-factor code, and which afterwards holds a logged-in Apple account. The only safe way to do that is over a private network between you and the host.
 
-Tailscale is the example the reference deployment uses, and the noVNC unit in this repository requires `tailscaled.service` for exactly that reason. Any WireGuard-style private network you control is an equivalent, and an SSH tunnel to a loopback-bound VNC is the smallest version of the same thing. Never expose VNC or noVNC on a public interface, not during setup and not afterwards.
+Tailscale is one example that fits, and the noVNC unit in this repository requires `tailscaled.service` for exactly that reason. Any WireGuard-style private network you control is an equivalent, and an SSH tunnel to a loopback-bound VNC is the smallest version of the same thing. Never expose VNC or noVNC on a public interface, not during setup and not afterwards.
 
 ## VNC and noVNC must stay on loopback
 
