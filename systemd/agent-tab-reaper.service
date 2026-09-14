@@ -1,0 +1,9 @@
+[Unit]
+Description=Close idle iCloud app tabs so Chromium stops leaking disk
+After=agent-browser.service
+
+[Service]
+Type=oneshot
+User=agent-icloud
+Group=agent-icloud
+ExecStart=/opt/agent-icloud/.venv/bin/python /opt/agent-icloud/bin/tab_reaper.py 15

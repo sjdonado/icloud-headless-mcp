@@ -1,0 +1,15 @@
+# Let the agent re-ask Apple for iCloud web access, and nothing else.
+#
+# Apple's data-access grant expires on its own, and the page keeps showing the old refusal until it
+# asks again. You cannot make that happen from your phone, so the agent has to be able to do it when
+# you say you are at a device.
+#
+# This used to grant `systemctl restart agent-browser.service`, which worked and was far too large:
+# a restart discards the warm tabs and the warm-up, and raises an approval prompt of its own, so a
+# tool meant to satisfy a prompt created one. Re-navigating the app tabs re-requests the grant and
+# leaves the browser standing, measured on 2026-08-21.
+#
+# One exact command, no arguments to vary, and the script is root-owned so the agent cannot edit
+# what it is allowed to run. It drops to agent-icloud internally: the agent never gains the browser
+# account, and it cannot restart or stop any unit.
+agent ALL=(root) NOPASSWD: /usr/local/bin/agent-reask-access

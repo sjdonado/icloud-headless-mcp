@@ -1,0 +1,22 @@
+[Unit]
+# The browser front end for agent-vnc. Keep it reachable only through a private network.
+# It fronts the existing VNC service, so a browser client uses the same stored password as a
+# native viewer.
+#
+# Deliberately NOT enabled at boot. The watchdog starts it when the iCloud session expires and
+# stops it once the session is back, so the recovery door is open only while it is needed.
+#
+Description=noVNC web front end for the iCloud browser display
+Requires=agent-vnc.service tailscaled.service
+After=agent-vnc.service tailscaled.service
+
+[Service]
+# No account of its own: it only bridges one loopback port to another.
+DynamicUser=yes
+# Loopback only. A private-network front end, if used, belongs outside this unit.
+ExecStart=/usr/bin/websockify --web=/usr/share/novnc 127.0.0.1:6080 127.0.0.1:5900
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes

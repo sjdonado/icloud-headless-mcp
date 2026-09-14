@@ -1,0 +1,24 @@
+[Unit]
+Description=Loopback VNC onto the iCloud browser's display, for an interactive Apple login
+# Attaches to the display the resident Chromium is already on, so you sign into the running
+# browser rather than a new one. A new browser would defeat the purpose: the session lives in
+# that process, and a relaunch is what we are trying to avoid.
+After=agent-xvfb.service
+Requires=agent-xvfb.service
+
+[Service]
+Type=simple
+User=agent-icloud
+Group=agent-icloud
+Environment=DISPLAY=:99
+# -localhost binds 127.0.0.1 only, so this is reachable through an ssh -L tunnel and from
+# nowhere else. -forever keeps it serving after you disconnect, -shared allows a second
+# viewer, and -rfbauth means it always asks for the stored password.
+ExecStart=/usr/bin/x11vnc -display :99 -rfbauth /opt/agent-icloud/.vncpass -localhost -rfbport 5900 -forever -shared -noxdamage -quiet
+Restart=no
+# x11vnc catches SIGTERM and exits 2, so an ordinary stop would leave the unit failed.
+SuccessExitStatus=2 143 SIGTERM
+
+# Deliberately no [Install] section. This is started by hand when a login is needed and
+# stopped afterwards; a VNC server that comes back on every boot is an open door nobody
+# remembers leaving open.

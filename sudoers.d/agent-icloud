@@ -1,0 +1,7 @@
+# One wrapper, where there were three. The three iCloud MCP servers became one process on
+# 2026-09-10, so `dav-mcp-stdio.sh`, `notes-mcp-stdio.sh` and `reminders-mcp-stdio.sh` are gone
+# and this is the only thing the agent may spawn as agent-icloud.
+#
+# One exact command, no argument to vary, and the wrapper is owned by agent-icloud rather than by
+# the agent, so the agent can run it and cannot rewrite what it is allowed to run.
+agent ALL=(agent-icloud) NOPASSWD: /opt/agent-icloud/bin/stdio.sh

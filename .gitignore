@@ -1,0 +1,8 @@
+.env
+cookies.json
+state.json
+*.vncpass
+__pycache__/
+.venv/
+.pytest_cache/
+drive-staging/

@@ -1,0 +1,28 @@
+[Unit]
+Description=Resident iCloud browser session
+After=agent-xvfb.service
+Requires=agent-xvfb.service
+
+[Service]
+User=agent-icloud
+Group=agent-icloud
+WorkingDirectory=/opt/agent-icloud
+Environment=DISPLAY=:99
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
+ExecStart=/opt/agent-icloud/.venv/bin/python /opt/agent-icloud/bin/icloud_resident.py
+# Restart after a crash. The resident does not warm application pages at startup, so a restart
+# does not itself trigger Apple's data-access prompt.
+#
+# Bound restarts so a crash loop stays failed and can be diagnosed: five starts in ten minutes.
+Restart=on-failure
+RestartSec=10
+StartLimitBurst=5
+StartLimitIntervalSec=600
+
+# Keep the browser's descriptor ceiling explicit. Investigate a wedged browser directly rather
+# than treating this limit as a general repair.
+LimitNOFILE=65536
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

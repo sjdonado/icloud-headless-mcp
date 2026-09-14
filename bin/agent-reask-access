@@ -1,0 +1,14 @@
+#!/bin/bash
+# Wrapper so the agent can re-ask Apple for access without being able to restart anything.
+#
+# It used to be allowed `systemctl restart agent-browser.service`, which worked but was far too big
+# a hammer: it discarded the warm tabs and the warm-up, and a restart raises an approval prompt of
+# its own. Re-navigating the app tabs achieves the same re-request and leaves everything standing.
+set -uo pipefail
+# runuser rather than sudo. This already runs as root, so it is dropping privileges, not gaining
+# them, and sudo is setuid: under the endpoint's NoNewPrivileges=yes it refuses outright with
+# "the no new privileges flag is set". The button led to that error page instead of working.
+exec runuser -u agent-icloud -- \
+  env DISPLAY=:99 PLAYWRIGHT_BROWSERS_PATH=/opt/playwright HOME=/opt/agent-icloud \
+  ICLOUD_STATE=/opt/agent-icloud ICLOUD_SHARED_STATE=/var/lib/icloud-state \
+  /opt/agent-icloud/.venv/bin/python /opt/agent-icloud/bin/reask_access.py

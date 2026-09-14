@@ -1,0 +1,6 @@
+# Pinned to what is running on this box. uv resolves the rest.
+caldav==3.2.1
+vobject==0.9.9
+mcp==2.0.0
+# the browser-backed modules attach to a resident Chromium over CDP
+playwright==1.62.0
