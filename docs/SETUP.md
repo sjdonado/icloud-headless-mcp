@@ -26,7 +26,7 @@ Set up Tailscale, or an equivalent WireGuard-style private network, between your
 
 The reason is step 6. The first login is you typing an Apple ID, a password and a two-factor code into a browser on a machine with no screen, reached through a remote desktop, and what you leave behind is a browser holding a logged-in Apple account. Neither VNC nor noVNC may ever be reachable on a public interface, at any point, including while you are setting it up.
 
-The reference deployment uses Tailscale: the noVNC unit in `systemd/` requires `tailscaled.service` and is reachable only over that tailnet, which is why the dependency is in the unit rather than being an accident of that box. Any other private network you control works the same way, and so does the plain SSH tunnel used in step 6, which is the smallest version of the same idea. What is not an option is opening the port.
+The shipped noVNC unit requires `tailscaled.service` and is reachable only over that tailnet, which is why the dependency is in the unit rather than being an accident of one box. Any other private network you control works the same way, and so does the plain SSH tunnel used in step 6, which is the smallest version of the same idea. What is not an option is opening the port.
 
 ## 1. Packages
 
@@ -47,7 +47,7 @@ sudo install -d -o agent-icloud -g agent-icloud -m 700 /opt/agent-icloud/bin
 ```
 The account name and the path above are a worked example, and they are the ones the shipped systemd units, `stdio.sh` and the sudoers rules already carry. Change them if you like, but change them in all four places together, or the units will start a server that is not there.
 
-Copy this directory's code into that `bin` directory, keeping `tools/` and `icloud_lib/` as subdirectories, owned by the service account and not writable by anybody else. The README's install block is one worked example of exactly that.
+Copy this directory's code into that `bin` directory, keeping `tools/` and `icloud_lib/` as subdirectories, owned by the service account and not writable by anybody else. The install block in `docs/ARCHITECTURE.md` is one worked example of exactly that.
 
 ## 3. The virtual environment and Chromium
 
@@ -159,6 +159,6 @@ A genuinely expired session is the other failure and it looks different: `sessio
 
 Restarting the browser is a decision, never a side effect. Reloading unit files, moving these files and re-running the wrapper are all free. Restarting the browser or the display is not.
 
-## 10. Configure your agent runtime to spawn `stdio.sh`
+## 10. Configure your agent runtime (Hermes or any MCP client) to spawn `stdio.sh`
 
-That is the last step, and it is the only one this document cannot write for you. This server is a child process of the runtime that drives it, on this same machine, so what remains is telling that runtime to spawn `sudo -n -u <service account> /opt/agent-icloud/bin/stdio.sh` with a timeout above 300 seconds. Where that is written down, and what the entry is called, belongs to the runtime's own configuration and its own documentation. Give the entry a name that is a valid identifier: a runtime that prefixes tool names with it needs one.
+That is the last step, and it is the only one this document cannot write for you. This server is a child process of the runtime that drives it, on this same machine, so what remains is telling that runtime to spawn `sudo -n -u <service account> /opt/agent-icloud/bin/stdio.sh` with a timeout above 300 seconds. Where that is written down, and what the entry is called, belongs to the runtime's own configuration and its own documentation. Give the entry a name that is a valid identifier such as `icloud-headless-mcp`: a runtime that prefixes tool names with it needs one. In Hermes this is a stdio MCP server entry with that command and timeout; the same entry reproduces on any other host.

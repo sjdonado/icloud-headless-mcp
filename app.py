@@ -36,7 +36,7 @@ PW = os.environ["ICLOUD_APP_PASSWORD"]
 TZ = ZoneInfo(os.environ["AGENT_TZ"])
 DEFAULT_LIST = os.environ.get("AGENT_DEFAULT_LIST", "Today")
 
-mcp = MCPServer("icloud-headless")
+mcp = MCPServer("icloud-headless-mcp")
 
 
 class Approve(BaseModel):
