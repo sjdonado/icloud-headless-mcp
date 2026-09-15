@@ -47,7 +47,7 @@ sudo install -d -o agent-icloud -g agent-icloud -m 700 /opt/agent-icloud/bin
 ```
 The account name and the path above are a worked example, and they are the ones the shipped systemd units, `stdio.sh` and the sudoers rules already carry. Change them if you like, but change them in all four places together, or the units will start a server that is not there.
 
-Copy this directory's code into that `bin` directory, keeping `tools/` and `icloud_lib/` as subdirectories, owned by the service account and not writable by anybody else. The install block in `docs/ARCHITECTURE.md` is one worked example of exactly that.
+Copy this directory's code into that `bin` directory, keeping `tools/` and `icloud_lib/` as subdirectories, owned by the service account and not writable by anybody else. The install block in the `README.md` (`Install from scratch`) is one worked example of exactly that.
 
 ## 3. The virtual environment and Chromium
 

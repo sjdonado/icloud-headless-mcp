@@ -27,7 +27,7 @@ python3 -m py_compile app.py server.py tools/*.py icloud_lib/*.py bin/*.py
 
 Both pass at time of writing (3 tests OK). There is no configured linter or typecheck; do not invent one.
 
-Integration, defined but not runnable here (need the Linux host, service account, resident browser, Apple credentials). Prefer these over reconstructing steps; see `docs/ARCHITECTURE.md` Verification and `docs/SETUP.md` section 8:
+Integration, defined but not runnable here (need the Linux host, service account, resident browser, Apple credentials). Prefer these over reconstructing steps; see `README.md` Verification and `docs/SETUP.md` section 8:
 
 ```
 sudo -n -u agent-icloud /opt/agent-icloud/bin/stdio.sh </dev/null
