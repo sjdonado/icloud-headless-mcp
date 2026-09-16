@@ -1,0 +1,11 @@
+# Keep secrets and machine state out of every build context, including
+# the dev image. Mirrors the credential entries of .gitignore.
+.git
+__pycache__/
+.venv/
+.pytest_cache/
+drive-staging/
+.env
+cookies.json
+state.json
+*.vncpass
