@@ -25,7 +25,7 @@ python3 -m unittest discover -s tests -v
 python3 -m py_compile app.py server.py tools/*.py icloud_lib/*.py bin/*.py
 ```
 
-Both pass at time of writing (3 tests OK). There is no configured linter or typecheck; do not invent one.
+Both pass at time of writing (8 tests OK with the install-time dependencies present, 3 OK + 5 skipped without them). There is no configured linter or typecheck; do not invent one.
 
 Integration, defined but not runnable here (need the Linux host, service account, resident browser, Apple credentials). Prefer these over reconstructing steps; see `README.md` Verification and `docs/SETUP.md` section 8:
 

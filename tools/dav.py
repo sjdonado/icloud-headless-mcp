@@ -11,9 +11,14 @@ This module takes no lock. DAV needs none, which is the whole reason a Notes cal
 calendar read even though both now run in one process.
 """
 import asyncio
+import base64
 import os
+import urllib.error
+import urllib.request
+import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urljoin
 from zoneinfo import ZoneInfo
 
 import caldav
@@ -353,6 +358,110 @@ async def update_event(uid: str, ctx: Context, summary: str | None = None,
         "stored_end": _fmt(stored.get("dtend").dt) if stored.get("dtend") else None,
         "stored_local": _local(stored.get("dtstart").dt) if stored.get("dtstart") else None,
     }
+
+
+# ------------------------------------------------------- contacts (CardDAV)
+#
+# Deliberately stdlib-only: urllib plus ElementTree, the same pair
+# tab_reaper.py uses for CDP. Contacts need a PROPFIND/REPORT client, not
+# another dependency. The app-specific password authenticates CardDAV the
+# same way it does CalDAV.
+
+_CARDDAV_BASE = "https://contacts.icloud.com"
+
+_DAV_NS = {"d": "DAV:", "card": "urn:ietf:params:xml:ns:carddav"}
+_CARDDAV = "urn:ietf:params:xml:ns:carddav"
+
+
+def _dav_request(method: str, url: str, body: str, depth: str | None = None) -> bytes:
+    """One authenticated DAV request. Transport errors raise as-is, so a
+    dead server reads as a tool failure rather than an empty address book."""
+    token = base64.b64encode(f"{USER}:{PW}".encode()).decode()
+    req = urllib.request.Request(url, data=body.encode(), method=method,
+                                 headers={"Content-Type": "application/xml",
+                                          "Authorization": f"Basic {token}"})
+    if depth is not None:
+        req.add_header("Depth", depth)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.read()
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"CardDAV {method} {url} failed: HTTP {exc.code}") from exc
+
+
+def _dav_parse(raw: bytes, what: str) -> ET.Element:
+    try:
+        return ET.fromstring(raw)
+    except ET.ParseError as exc:
+        raise RuntimeError(f"CardDAV {what} returned unparseable XML: {exc}") from exc
+
+
+def _carddav_books() -> list[tuple[str, str]]:
+    """Every address book as (display name, absolute href)."""
+    root = _dav_parse(_dav_request(
+        "PROPFIND", _CARDDAV_BASE + "/",
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<d:propfind xmlns:d="DAV:"><d:prop>'
+        "<d:current-user-principal/></d:prop></d:propfind>", "0"), "principal")
+    href = root.findtext(".//d:current-user-principal/d:href", namespaces=_DAV_NS)
+    if not href:
+        raise RuntimeError("CardDAV discovery found no current-user-principal")
+    principal = urljoin(_CARDDAV_BASE + "/", href)
+
+    root = _dav_parse(_dav_request(
+        "PROPFIND", principal,
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<d:propfind xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">'
+        "<d:prop><card:addressbook-home-set/></d:prop></d:propfind>", "0"),
+        "addressbook-home-set")
+    href = root.findtext(".//card:addressbook-home-set/d:href", namespaces=_DAV_NS)
+    if not href:
+        raise RuntimeError("CardDAV discovery found no addressbook-home-set")
+    home = urljoin(_CARDDAV_BASE + "/", href)
+
+    root = _dav_parse(_dav_request(
+        "PROPFIND", home,
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<d:propfind xmlns:d="DAV:"><d:prop><d:resourcetype/>'
+        "<d:displayname/></d:prop></d:propfind>", "1"), "address books")
+    books = []
+    for response in root.findall("d:response", _DAV_NS):
+        rtype = response.find("d:propstat/d:prop/d:resourcetype", _DAV_NS)
+        if rtype is None or not any(
+                child.tag == f"{{{_CARDDAV}}}addressbook" for child in rtype):
+            continue
+        href = response.findtext("d:href", namespaces=_DAV_NS)
+        name = response.findtext("d:propstat/d:prop/d:displayname",
+                                 namespaces=_DAV_NS) or "contacts"
+        if href:
+            books.append((name, urljoin(_CARDDAV_BASE + "/", href)))
+    return books
+
+
+def _all_vcards() -> list[str]:
+    """Every vCard on the account, raw text, across all address books.
+
+    A book that fails is skipped, never fatal: one broken share must not
+    hide the rest of the address book.
+    """
+    out = []
+    for _, href in _carddav_books():
+        try:
+            root = _dav_parse(_dav_request(
+                "REPORT", href,
+                '<?xml version="1.0" encoding="utf-8"?>'
+                '<card:addressbook-query xmlns:d="DAV:" '
+                'xmlns:card="urn:ietf:params:xml:ns:carddav">'
+                "<d:prop><d:getetag/><card:address-data/></d:prop>"
+                # No filter: the whole address book. Matching happens
+                # locally with values decoded, the same posture as mail.
+                "</card:addressbook-query>", "1"), "addressbook-query")
+        except Exception:
+            continue
+        for el in root.findall(".//card:address-data", _DAV_NS):
+            if el.text:
+                out.append(el.text)
+    return out
 
 
 @mcp.tool()
