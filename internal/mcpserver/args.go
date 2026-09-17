@@ -33,16 +33,20 @@ func (a Args) Str(name string) (string, error) {
 	return s, nil
 }
 
-// OptStr returns an optional string argument, or nil when absent.
-func (a Args) OptStr(name string) *string {
+// OptStr returns an optional string argument, or nil when absent. A
+// present-but-wrongly-typed value is an error, not a silent default: the
+// default usually widens scope (All iCloud, INBOX), and silently reading
+// a wider scope than asked is the failure this server exists to prevent.
+func (a Args) OptStr(name string) (*string, error) {
 	v, ok := a[name]
 	if !ok || v == nil {
-		return nil
+		return nil, nil
 	}
-	if s, ok := v.(string); ok {
-		return &s
+	s, ok := v.(string)
+	if !ok {
+		return nil, fmt.Errorf("argument %q must be a string", name)
 	}
-	return nil
+	return &s, nil
 }
 
 // Int returns an integer argument or the default when absent. JSON numbers
@@ -82,6 +86,38 @@ func (a Args) Bool(name string, def bool) (bool, error) {
 		return false, fmt.Errorf("argument %q must be a boolean", name)
 	}
 	return b, nil
+}
+
+// OptAll fetches several optional string arguments at once, in order.
+func (a Args) OptAll(names ...string) ([]*string, error) {
+	out := make([]*string, len(names))
+	for i, name := range names {
+		s, err := a.OptStr(name)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = s
+	}
+	return out, nil
+}
+
+// StrOr returns an optional string argument or def when absent.
+func (a Args) StrOr(name, def string) (string, error) {
+	s, err := a.OptStr(name)
+	if err != nil || s == nil {
+		return def, err
+	}
+	return *s, nil
+}
+
+// TruncateRunes cuts s to n characters. Python slices str (characters);
+// byte slicing splits multi-byte text mid-rune.
+func TruncateRunes(s string, n int) string {
+	runes := []rune(s)
+	if len(runes) <= n {
+		return s
+	}
+	return string(runes[:n])
 }
 
 // ErrorResult renders a domain error the way the Python tools do: a result

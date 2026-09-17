@@ -65,6 +65,17 @@ The Go tree builds in parallel while Python stays live and frozen as the referen
 4. Phase 3: browser surfaces and Drive fetch mechanics, verified live; session helpers ported.
 5. Cutover: apply wrapper/unit path swaps, update install/verification docs, run the full live checklist; rollback is a wrapper revert. Python leaves the install path only after the gate.
 
+## Deviation (recorded during implementation)
+
+No driver library was adopted: the tools drive raw CDP through
+`internal/browser` (isolated worlds per frame, Input domain for
+pointer/keyboard, clipboard grant, Network tap for Drive sniffing). The
+Python logic maps 1:1 onto CDP calls, both candidate drivers would have
+added an API layer over the same calls without removing any quirk, and
+`go.mod` carries no browser-driving dependency. The spike gate in tasks
+1.5 is satisfied by absence: there is no loser to delete. Revisit only if
+raw CDP proves insufficient against a concrete page behavior.
+
 ## Open Questions
 
 - Go toolchain pin (assumed: current stable in `go.mod` at scaffold time; revisit only if a chosen library requires newer).

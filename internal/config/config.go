@@ -41,6 +41,26 @@ func getenv(key, def string) string {
 // Load reads the environment once. A missing required key is an error naming
 // the key, mirroring the Python import-time KeyError with a better message.
 func Load() (*Config, error) {
+	c := LoadEnv()
+	if c.AppleID == "" {
+		return nil, fmt.Errorf("missing required environment: ICLOUD_APPLE_ID")
+	}
+	if c.AppPassword == "" {
+		return nil, fmt.Errorf("missing required environment: ICLOUD_APP_PASSWORD")
+	}
+	// Required even when the TZ file would suffice, mirroring the Python
+	// import: a zone guessed later types the wrong hour into an Apple
+	// picker and nothing errors.
+	if c.AgentTZ == "" {
+		return nil, fmt.Errorf("missing required environment: AGENT_TZ")
+	}
+	return c, nil
+}
+
+// LoadEnv reads the environment without requiring credentials. Helpers
+// that never touch DAV or IMAP (reask, drain, drive fetch, tab reaper)
+// run under it, mirroring Python modules that never import the account.
+func LoadEnv() *Config {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		home = ""
@@ -61,13 +81,7 @@ func Load() (*Config, error) {
 	}
 	c.DriveStaging = getenv("DRIVE_STAGING", filepath.Join(c.StateDir, "drive-staging"))
 	c.DriveEtags = getenv("DRIVE_ETAGS", filepath.Join(c.StateDir, "state", "drive-etags.json"))
-	if c.AppleID == "" {
-		return nil, fmt.Errorf("missing required environment: ICLOUD_APPLE_ID")
-	}
-	if c.AppPassword == "" {
-		return nil, fmt.Errorf("missing required environment: ICLOUD_APP_PASSWORD")
-	}
-	return c, nil
+	return c
 }
 
 // LocalTimezone is the owner's current zone: whatever the TZ file holds,

@@ -4,7 +4,7 @@
 - [x] 1.2 Register all 23 tools with exact names and tiers behind a stub handler; verify `tools/list` output matches the Python server
 - [x] 1.3 Elicitation smoke test: confirmed-tool ask, accept, decline, and no-back-channel refusal verified against the real client
 - [x] 1.4 Confirm whether the loopback `streamable-http` branch stays for parity
-- [ ] 1.5 Driver spike: read-only `notes_folders` flow on chromedp and go-rod; pick the winner on shadow-DOM, trusted input, and clipboard; delete the loser
+- [x] 1.5 Driver spike: read-only `notes_folders` flow on chromedp and go-rod; pick the winner on shadow-DOM, trusted input, and clipboard; delete the loser
 
 ## 2. Phase 1 DAV, contacts, and mail
 

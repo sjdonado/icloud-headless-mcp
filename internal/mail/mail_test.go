@@ -77,7 +77,7 @@ func TestListMailNewestFirst(t *testing.T) {
 	for _, m := range msgs {
 		uids = append(uids, m["uid"].(string))
 	}
-	want := []string{"4", "3", "2", "1"}
+	want := []string{"5", "4", "3", "2", "1"}
 	if strings.Join(uids, ",") != strings.Join(want, ",") {
 		t.Fatalf("order = %v, want %v", uids, want)
 	}
@@ -94,7 +94,7 @@ func TestListMailNewestFirst(t *testing.T) {
 	if byUID["3"]["answered"] != true || byUID["1"]["answered"] != false {
 		t.Fatalf("answered flags wrong: %v", byUID)
 	}
-	if out["matched"] != 4 || out["count"] != 4 {
+	if out["matched"] != 5 || out["count"] != 5 {
 		t.Fatalf("result = %v", out)
 	}
 }
@@ -107,7 +107,7 @@ func TestListMailUnreadOnlyAndLimit(t *testing.T) {
 		t.Fatalf("ListMail: %v", err)
 	}
 	msgs, _ := out["messages"].([]map[string]any)
-	if len(msgs) != 2 || msgs[0]["uid"] != "4" || msgs[1]["uid"] != "2" {
+	if len(msgs) != 3 || msgs[0]["uid"] != "5" || msgs[1]["uid"] != "4" || msgs[2]["uid"] != "2" {
 		t.Fatalf("unread_only = %v", msgs)
 	}
 	out, err = c.ListMail(context.Background(), "INBOX", 2, false, nil, nil)
@@ -115,7 +115,7 @@ func TestListMailUnreadOnlyAndLimit(t *testing.T) {
 		t.Fatalf("ListMail: %v", err)
 	}
 	msgs, _ = out["messages"].([]map[string]any)
-	if out["matched"] != 4 || len(msgs) != 2 || msgs[0]["uid"] != "4" {
+	if out["matched"] != 5 || len(msgs) != 2 || msgs[0]["uid"] != "5" {
 		t.Fatalf("limited = %v", out)
 	}
 }
@@ -214,7 +214,7 @@ func TestSearchEncodedSubjectNeedsLocalPass(t *testing.T) {
 	if !text || !subject || !from {
 		t.Fatalf("server union incomplete: %v", fake.searches)
 	}
-	if out["scanned_recent"] != 4 || out["messages_in_range"] != 4 {
+	if out["scanned_recent"] != 5 || out["messages_in_range"] != 5 {
 		t.Fatalf("completeness counters = %v", out)
 	}
 }
@@ -227,8 +227,8 @@ func TestSearchSortSliceAndCounters(t *testing.T) {
 		t.Fatalf("SearchMail: %v", err)
 	}
 	msgs, _ := out["messages"].([]map[string]any)
-	if out["matched"] != 4 || len(msgs) != 2 || msgs[0]["uid"] != "4" || msgs[1]["uid"] != "3" {
-		t.Fatalf("result = %v (want newest 2 of 4 matched)", out)
+	if out["matched"] != 5 || len(msgs) != 2 || msgs[0]["uid"] != "5" || msgs[1]["uid"] != "4" {
+		t.Fatalf("result = %v (want newest 2 of 5 matched)", out)
 	}
 }
 
@@ -311,6 +311,21 @@ func TestReadMailAttachmentsSave(t *testing.T) {
 	}
 	if saved, _ := out["attachments_saved"].([]map[string]any); len(saved) != 0 {
 		t.Fatalf("unsolicited save: %v", saved)
+	}
+}
+
+func TestReadMailNestedMultipart(t *testing.T) {
+	_, addr := newFakeIMAP(t)
+	c := testClient(t, addr)
+	out, err := c.ReadMail(context.Background(), "5", "INBOX", false)
+	if err != nil {
+		t.Fatalf("ReadMail: %v", err)
+	}
+	if body, _ := out["body"].(string); !strings.Contains(body, "Inner body text.") {
+		t.Fatalf("nested body lost: %q", body)
+	}
+	if names, _ := out["attachments"].([]string); len(names) != 1 || names[0] != "n.txt" {
+		t.Fatalf("nested attachments = %v", names)
 	}
 }
 

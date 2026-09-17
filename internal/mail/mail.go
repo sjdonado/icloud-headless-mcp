@@ -12,7 +12,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"mime"
@@ -28,6 +30,7 @@ import (
 	"github.com/emersion/go-imap/v2/imapclient"
 	"github.com/emersion/go-message"
 	"github.com/emersion/go-message/charset"
+	gomail "github.com/emersion/go-message/mail"
 	"github.com/emersion/go-sasl"
 	"github.com/emersion/go-smtp"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -487,9 +490,7 @@ func safeName(raw, fallback string) string {
 		}
 	}
 	name := strings.Trim(kept.String(), " .")
-	if len(name) > 120 {
-		name = name[:120]
-	}
+	name = mcpserver.TruncateRunes(name, 120)
 	if name == "" {
 		return fallback
 	}
@@ -541,58 +542,76 @@ type mailPart struct {
 // collectParts walks a message the way read_mail does: attachment parts are
 // listed and, when asked for, saved; the first text/plain is the body; the
 // first text/html is the fallback; a non-multipart message without either
-// is read whole.
+// is read whole. The mail.Reader descends into nested multiparts the way
+// message.walk does; attachment-hood is the Content-Disposition header,
+// not the content type.
+// partFilename is the attachment's filename: the disposition parameter
+// first, then the content-type name, matching get_filename.
+func partFilename(h gomail.PartHeader) string {
+	type header interface {
+		ContentDisposition() (string, map[string]string, error)
+		ContentType() (string, map[string]string, error)
+	}
+	dh, ok := h.(header)
+	if !ok {
+		return ""
+	}
+	_, dispParams, _ := dh.ContentDisposition()
+	if name := dispParams["filename"]; name != "" {
+		return name
+	}
+	_, typeParams, _ := dh.ContentType()
+	return typeParams["name"]
+}
+
 func collectParts(raw []byte) (body, html string, attachments []mailPart, isMultipart bool, err error) {
-	ent, err := message.Read(bytes.NewReader(raw))
-	if err != nil {
+	mr, err := gomail.CreateReader(bytes.NewReader(raw))
+	if err != nil && !message.IsUnknownCharset(err) {
 		return "", "", nil, false, err
 	}
-	mr := ent.MultipartReader()
-	if mr == nil {
-		isMultipart = false
-		ctype, params, _ := ent.Header.ContentType()
-		if !strings.HasPrefix(strings.ToLower(ctype), "text/") {
-			return "", "", nil, false, nil
-		}
-		bodyBytes, err := io.ReadAll(ent.Body)
-		if err != nil {
-			return "", "", nil, false, err
-		}
-		return decodeBody(bodyBytes, charsetOf(params)), "", nil, false, nil
-	}
-	isMultipart = true
 	for {
-		p, err := mr.NextPart()
+		part, err := mr.NextPart()
 		if err == io.EOF {
 			break
 		}
-		if err != nil {
+		if err != nil && !message.IsUnknownCharset(err) {
 			return "", "", nil, true, err
 		}
-		ph := p.Header
-		ctype, params, _ := ph.ContentType()
+		if part == nil {
+			continue
+		}
+		var ctype string
+		var params map[string]string
+		var disp string
+		switch h := part.Header.(type) {
+		case *gomail.AttachmentHeader:
+			ctype, params, _ = h.ContentType()
+			disp, _, _ = h.ContentDisposition()
+		case *gomail.InlineHeader:
+			ctype, params, _ = h.ContentType()
+			disp, _, _ = h.ContentDisposition()
+		default:
+			continue
+		}
 		ctype = strings.ToLower(ctype)
-		disp, dispParams, _ := ph.ContentDisposition()
-		payload, err := io.ReadAll(p.Body)
+		payload, err := io.ReadAll(part.Body)
 		if err != nil {
 			return "", "", nil, true, err
 		}
 		if strings.Contains(strings.ToLower(disp), "attachment") {
-			filename := dispParams["filename"]
-			if filename == "" {
-				filename = params["name"]
-			}
 			attachments = append(attachments, mailPart{
-				isAttachment: true, filename: filename,
+				isAttachment: true, filename: partFilename(part.Header),
 				contentType: ctype, charset: charsetOf(params), body: payload,
 			})
 		} else if ctype == "text/plain" && body == "" {
+			isMultipart = true
 			body = decodeBody(payload, charsetOf(params))
 		} else if ctype == "text/html" && html == "" {
+			isMultipart = true
 			html = decodeBody(payload, charsetOf(params))
 		}
 	}
-	return body, html, attachments, true, nil
+	return body, html, attachments, isMultipart, nil
 }
 
 func charsetOf(params map[string]string) string {
@@ -718,9 +737,9 @@ func (c *Client) ReadMail(ctx context.Context, uid, mailbox string, saveAttachme
 		expired = c.expireAttachments()
 		saved, skipped = c.saveAttachments(parts, uid)
 	}
-	truncated := len(body) > bodyLimit
+	truncated := len([]rune(body)) > bodyLimit
 	if truncated {
-		body = body[:bodyLimit]
+		body = string([]rune(body)[:bodyLimit])
 	}
 	return map[string]any{
 		"uid":                 uid,
@@ -869,8 +888,12 @@ func (c *Client) SearchMail(ctx context.Context, query, mailbox string, limit in
 
 // SendMail sends mail from the owner's address, after asking them to
 // approve the exact message. Where nobody can answer, it refuses and sends
-// nothing.
+// nothing. Recipient and subject reject line breaks: they are interpolated
+// into headers, where a CR or LF would inject new ones.
 func (c *Client) SendMail(ctx context.Context, to, subject, body string) (map[string]any, error) {
+	if strings.ContainsAny(to, "\r\n") || strings.ContainsAny(subject, "\r\n") {
+		return map[string]any{"error": "recipient and subject must not contain line breaks"}, nil
+	}
 	preview := body
 	if len(body) > sendPreview {
 		preview = body[:sendPreview] + "\n[...truncated in preview]"
@@ -897,9 +920,7 @@ func (c *Client) send(to, subject, body string) error {
 		return err
 	}
 	defer cl.Close()
-	if err := cl.Auth(sasl.NewPlainClient("", c.cfg.AppleID, c.cfg.AppPassword)); err != nil {
-		return err
-	}
+	// The dialer authenticates; sending authenticates nothing twice.
 	if err := cl.Mail(c.cfg.AppleID, nil); err != nil {
 		return err
 	}
@@ -910,13 +931,24 @@ func (c *Client) send(to, subject, body string) error {
 	if err != nil {
 		return err
 	}
+	var enc mime.WordEncoder
 	msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\n"+
+		"Date: %s\r\nMessage-ID: %s\r\n"+
 		"MIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n%s",
-		c.cfg.AppleID, to, subject, body)
+		c.cfg.AppleID, to, enc.Encode("utf-8", subject),
+		time.Now().UTC().Format(time.RFC1123Z), newMessageID(), body)
 	if _, err := io.WriteString(w, msg); err != nil {
 		return err
 	}
 	return w.Close()
+}
+
+func newMessageID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("<%d@icloud-headless-mcp>", time.Now().UnixNano())
+	}
+	return fmt.Sprintf("<%s@icloud-headless-mcp>", hex.EncodeToString(b[:]))
 }
 
 // Handlers wires the five mail tools. Each opens its own connection per
@@ -938,12 +970,16 @@ func Handlers(cfg *config.Config, ask func(ctx context.Context, question string)
 			if err != nil {
 				return mcpserver.ErrorResult(err.Error())
 			}
-			mailbox := "INBOX"
-			if m := args.OptStr("mailbox"); m != nil {
-				mailbox = *m
+			mailbox, err := args.StrOr("mailbox", "INBOX")
+			if err != nil {
+				return mcpserver.ErrorResult(err.Error())
+			}
+			opt, err := args.OptAll("since", "until")
+			if err != nil {
+				return mcpserver.ErrorResult(err.Error())
 			}
 			return runMap(func(c *Client) (map[string]any, error) {
-				return c.ListMail(ctx, mailbox, limit, unreadOnly, args.OptStr("since"), args.OptStr("until"))
+				return c.ListMail(ctx, mailbox, limit, unreadOnly, opt[0], opt[1])
 			}, cfg, ask)
 		},
 		"read_mail": func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -952,9 +988,9 @@ func Handlers(cfg *config.Config, ask func(ctx context.Context, question string)
 			if err != nil {
 				return mcpserver.ErrorResult(err.Error())
 			}
-			mailbox := "INBOX"
-			if m := args.OptStr("mailbox"); m != nil {
-				mailbox = *m
+			mailbox, err := args.StrOr("mailbox", "INBOX")
+			if err != nil {
+				return mcpserver.ErrorResult(err.Error())
 			}
 			save, err := args.Bool("save_attachments", false)
 			if err != nil {
@@ -974,12 +1010,16 @@ func Handlers(cfg *config.Config, ask func(ctx context.Context, question string)
 			if err != nil {
 				return mcpserver.ErrorResult(err.Error())
 			}
-			mailbox := "INBOX"
-			if m := args.OptStr("mailbox"); m != nil {
-				mailbox = *m
+			mailbox, err := args.StrOr("mailbox", "INBOX")
+			if err != nil {
+				return mcpserver.ErrorResult(err.Error())
+			}
+			opt, err := args.OptAll("since", "until")
+			if err != nil {
+				return mcpserver.ErrorResult(err.Error())
 			}
 			return runMap(func(c *Client) (map[string]any, error) {
-				return c.SearchMail(ctx, query, mailbox, limit, args.OptStr("since"), args.OptStr("until"))
+				return c.SearchMail(ctx, query, mailbox, limit, opt[0], opt[1])
 			}, cfg, ask)
 		},
 		"send_mail": func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

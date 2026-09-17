@@ -167,7 +167,8 @@ func parseDay(value, field string) (time.Time, error) {
 }
 
 // defaultCalendar is the configured calendar, and only then whichever one
-// sorts first. Callers guarantee events is non-empty.
+// sorts first. Callers guarantee events is non-empty; the empty case
+// returns "" rather than panicking, and resolves to unknown-calendar.
 func defaultCalendar(events map[string]caldav.Calendar, configured string) string {
 	if _, ok := events[configured]; ok {
 		return configured
@@ -177,6 +178,9 @@ func defaultCalendar(events map[string]caldav.Calendar, configured string) strin
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	if len(names) == 0 {
+		return ""
+	}
 	return names[0]
 }
 
@@ -793,10 +797,3 @@ func (c *Client) SearchContacts(ctx context.Context, query string, limit int) (m
 	}
 	return map[string]any{"count": len(out), "contacts": out}, nil
 }
-
-// addressDataAll is the address-data request for "give me every card".
-func addressDataAll() carddav.AddressDataRequest {
-	return carddav.AddressDataRequest{AllProp: true}
-}
-
-var _ = addressDataAll

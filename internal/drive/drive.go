@@ -60,8 +60,11 @@ func Status(cfg *config.Config, now time.Time) (map[string]any, error) {
 		staged := filepath.Join(cfg.DriveStaging, lib.Dest)
 		var newest *time.Time
 		count := 0
-		_ = filepath.Walk(staged, func(p string, info os.FileInfo, err error) error {
-			if err != nil || info.IsDir() {
+		walkErr := filepath.Walk(staged, func(p string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.IsDir() {
 				return nil
 			}
 			count++
@@ -71,6 +74,11 @@ func Status(cfg *config.Config, now time.Time) (map[string]any, error) {
 			}
 			return nil
 		})
+		// A missing staging dir is normal (nothing pulled yet); any other
+		// walk failure is a real error, not a healthy zero.
+		if walkErr != nil && !os.IsNotExist(walkErr) {
+			return nil, walkErr
+		}
 		perLibrary[lib.Name] = map[string]any{
 			"kind":         lib.Kind,
 			"staged_under": lib.Dest,

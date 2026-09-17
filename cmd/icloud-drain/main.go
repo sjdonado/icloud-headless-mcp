@@ -18,14 +18,66 @@ import (
 	"github.com/sjdonado/icloud-headless-mcp/internal/browser"
 	"github.com/sjdonado/icloud-headless-mcp/internal/config"
 	"github.com/sjdonado/icloud-headless-mcp/internal/drain"
+	"github.com/sjdonado/icloud-headless-mcp/internal/notes"
 	"github.com/sjdonado/icloud-headless-mcp/internal/queue"
+	"github.com/sjdonado/icloud-headless-mcp/internal/reminders"
 )
 
-// productionRunner dispatches queued kinds to the tool functions. The
-// browser-backed kinds wire up in Phase 4; unknown kinds report an error
-// rather than a guess, and the retry accounting treats that as transient.
-func productionRunner(_ context.Context, kind string, _ map[string]any) map[string]any {
-	return map[string]any{"error": fmt.Sprintf("nothing here knows how to run %s", kind)}
+// productionRunner dispatches queued kinds to the same tool functions the
+// agent calls rather than reimplementing them.
+func productionRunner(cfg *config.Config) drain.Runner {
+	refuse := func(context.Context, string) string {
+		return "nobody was present to approve it, so nothing was done"
+	}
+	return func(ctx context.Context, kind string, params map[string]any) map[string]any {
+		str := func(key string) string {
+			s, _ := params[key].(string)
+			return s
+		}
+		folder := func() *string {
+			if s := str("folder"); s != "" {
+				return &s
+			}
+			return nil
+		}
+		switch kind {
+		case "create_note":
+			nc, err := notes.Dial(cfg)
+			if err != nil {
+				return map[string]any{"error": err.Error()}
+			}
+			nc.Ask = refuse
+			out, err := nc.Create(ctx, str("title"), str("body"), folder())
+			if err != nil {
+				return map[string]any{"error": err.Error()}
+			}
+			return out
+		case "create_reminder":
+			rc, err := reminders.Dial(cfg)
+			if err != nil {
+				return map[string]any{"error": err.Error()}
+			}
+			rc.Ask = refuse
+			out, err := rc.Create(ctx, str("title"), str("list_name"), str("due"))
+			if err != nil {
+				return map[string]any{"error": err.Error()}
+			}
+			return out
+		case "complete_reminder":
+			rc, err := reminders.Dial(cfg)
+			if err != nil {
+				return map[string]any{"error": err.Error()}
+			}
+			rc.Ask = refuse
+			out, err := rc.Complete(ctx, str("title"), str("list_name"))
+			if err != nil {
+				return map[string]any{"error": err.Error()}
+			}
+			return out
+		default:
+			return map[string]any{"error": fmt.Sprintf("nothing here knows how to run %s", kind)}
+		}
+	}
 }
 
 func main() {
@@ -35,11 +87,7 @@ func main() {
 			reportOnly = true
 		}
 	}
-	cfg, err := config.Load()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "bad environment: %v\n", err)
-		os.Exit(1)
-	}
+	cfg := config.LoadEnv()
 	tzName, err := cfg.LocalTimezone()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "bad environment: %v\n", err)
@@ -55,7 +103,7 @@ func main() {
 		State:     browser.State{Dir: cfg.StateDir, Shared: cfg.SharedState, CDP: cfg.CDP},
 		OwnerZone: owner,
 		Now:       time.Now,
-		Run:       productionRunner,
+		Run:       productionRunner(cfg),
 		Out:       os.Stdout,
 		ErrOut:    os.Stderr,
 	}

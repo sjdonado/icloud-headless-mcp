@@ -24,7 +24,7 @@ func clearEnv(t *testing.T, keys ...string) {
 }
 
 func TestLoadRequiresCredentials(t *testing.T) {
-	clearEnv(t, "ICLOUD_APPLE_ID", "ICLOUD_APP_PASSWORD")
+	clearEnv(t, "ICLOUD_APPLE_ID", "ICLOUD_APP_PASSWORD", "AGENT_TZ")
 	if _, err := Load(); err == nil {
 		t.Fatal("Load succeeded without credentials")
 	} else if got := err.Error(); !contains(got, "ICLOUD_APPLE_ID") {
@@ -36,11 +36,18 @@ func TestLoadRequiresCredentials(t *testing.T) {
 	} else if got := err.Error(); !contains(got, "ICLOUD_APP_PASSWORD") {
 		t.Fatalf("error %q does not name the missing key", got)
 	}
+	setEnv(t, "ICLOUD_APP_PASSWORD", "xxxx")
+	if _, err := Load(); err == nil {
+		t.Fatal("Load succeeded without AGENT_TZ")
+	} else if got := err.Error(); !contains(got, "AGENT_TZ") {
+		t.Fatalf("error %q does not name the missing key", got)
+	}
 }
 
 func TestLoadDefaults(t *testing.T) {
 	setEnv(t, "ICLOUD_APPLE_ID", "you@icloud.com")
 	setEnv(t, "ICLOUD_APP_PASSWORD", "xxxx")
+	setEnv(t, "AGENT_TZ", "Europe/Amsterdam")
 	clearEnv(t, "AGENT_DEFAULT_LIST", "AGENT_DEFAULT_CALENDAR", "ICLOUD_CDP",
 		"AGENT_MCP_TRANSPORT", "DRIVE_LIBRARIES", "ICLOUD_STATE", "ICLOUD_SHARED_STATE",
 		"MAIL_ATTACHMENTS_DIR", "DRIVE_STAGING", "DRIVE_ETAGS", "AGENT_TZ_FILE")

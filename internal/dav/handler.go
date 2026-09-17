@@ -52,8 +52,12 @@ func Handlers(cfg *config.Config, ask func(ctx context.Context, question string)
 			if err != nil {
 				return mcpserver.ErrorResult(err.Error())
 			}
+			opt, err := args.OptAll("calendar", "start", "end")
+			if err != nil {
+				return mcpserver.ErrorResult(err.Error())
+			}
 			return runMap(func(c *Client) (map[string]any, error) {
-				return c.ListEvents(ctx, daysAhead, daysBack, args.OptStr("calendar"), args.OptStr("start"), args.OptStr("end"))
+				return c.ListEvents(ctx, daysAhead, daysBack, opt[0], opt[1], opt[2])
 			}, cfg, ask)
 		},
 		"create_event": func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -66,9 +70,12 @@ func Handlers(cfg *config.Config, ask func(ctx context.Context, question string)
 			if err != nil {
 				return mcpserver.ErrorResult(err.Error())
 			}
+			opt, err := args.OptAll("end", "calendar", "location", "description", "timezone")
+			if err != nil {
+				return mcpserver.ErrorResult(err.Error())
+			}
 			return runMap(func(c *Client) (map[string]any, error) {
-				return c.CreateEvent(ctx, summary, start, args.OptStr("end"), args.OptStr("calendar"),
-					args.OptStr("location"), args.OptStr("description"), args.OptStr("timezone"))
+				return c.CreateEvent(ctx, summary, start, opt[0], opt[1], opt[2], opt[3], opt[4])
 			}, cfg, ask)
 		},
 		"update_event": func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -77,9 +84,12 @@ func Handlers(cfg *config.Config, ask func(ctx context.Context, question string)
 			if err != nil {
 				return mcpserver.ErrorResult(err.Error())
 			}
+			opt, err := args.OptAll("summary", "start", "end", "location", "description", "timezone")
+			if err != nil {
+				return mcpserver.ErrorResult(err.Error())
+			}
 			return runMap(func(c *Client) (map[string]any, error) {
-				return c.UpdateEvent(ctx, uid, args.OptStr("summary"), args.OptStr("start"),
-					args.OptStr("end"), args.OptStr("location"), args.OptStr("description"), args.OptStr("timezone"))
+				return c.UpdateEvent(ctx, uid, opt[0], opt[1], opt[2], opt[3], opt[4], opt[5])
 			}, cfg, ask)
 		},
 		"delete_event": func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

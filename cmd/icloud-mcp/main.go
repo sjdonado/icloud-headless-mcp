@@ -17,6 +17,8 @@ import (
 	"github.com/sjdonado/icloud-headless-mcp/internal/drive"
 	"github.com/sjdonado/icloud-headless-mcp/internal/mail"
 	"github.com/sjdonado/icloud-headless-mcp/internal/mcpserver"
+	"github.com/sjdonado/icloud-headless-mcp/internal/notes"
+	"github.com/sjdonado/icloud-headless-mcp/internal/reminders"
 )
 
 func main() {
@@ -36,6 +38,12 @@ func main() {
 		handlers[name] = h
 	}
 	for name, h := range drive.Handlers(cfg) {
+		handlers[name] = h
+	}
+	for name, h := range notes.Handlers(cfg, ask) {
+		handlers[name] = h
+	}
+	for name, h := range reminders.Handlers(cfg, ask) {
 		handlers[name] = h
 	}
 	srv = mcpserver.NewWithHandlers(handlers)

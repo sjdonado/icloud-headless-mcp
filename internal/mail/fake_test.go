@@ -63,6 +63,20 @@ const (
 		"Content-Transfer-Encoding: base64\r\n\r\n" +
 		"TVoAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\r\n" +
 		"--b2--\r\n"
+
+	fxNestedHeaders = "From: nested@example.com\r\nSubject: Nested parts\r\n" +
+		"Date: Thu, 10 Sep 2026 08:00:00 +0200\r\n"
+	fxNested = fxNestedHeaders +
+		"Content-Type: multipart/mixed; boundary=\"outer\"\r\n\r\n" +
+		"--outer\r\nContent-Type: multipart/alternative; boundary=\"inner\"\r\n\r\n" +
+		"--inner\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nInner body text.\r\n" +
+		"--inner\r\nContent-Type: text/html; charset=utf-8\r\n\r\n" +
+		"<html><body><p>Inner body text.</p></body></html>\r\n" +
+		"--inner--\r\n" +
+		"--outer\r\nContent-Type: text/plain; name=\"n.txt\"\r\n" +
+		"Content-Disposition: attachment; filename=\"n.txt\"\r\n\r\n" +
+		"note\r\n" +
+		"--outer--\r\n"
 )
 
 // fakeIMAP is a hand-rolled IMAP server speaking exactly the commands the
@@ -87,6 +101,7 @@ func newFakeIMAP(t *testing.T) (*fakeIMAP, string) {
 				{uid: 2, internalDate: d(2026, 9, 20), from: "sklep@example.com", subject: "=?UTF-8?B?RmFrdHVyYSB6YSB3cnplc2llxYQ=?=", raw: fxEnc},
 				{uid: 3, seen: true, answered: true, internalDate: d(2026, 9, 25), from: "airline@example.com", subject: "Your boarding pass", raw: fxHTML},
 				{uid: 4, internalDate: d(2026, 9, 30), from: "bank@example.com", subject: "September statement", raw: fxAttach},
+				{uid: 5, internalDate: d(2026, 9, 10), from: "nested@example.com", subject: "Nested parts", raw: fxNested},
 			},
 			"Archive": {},
 		},
