@@ -75,13 +75,14 @@ func reaskAccess(ctx context.Context, cfg *config.Config, state browser.State, a
 }
 
 func openLogin(ctx context.Context, cfg *config.Config, state browser.State, ask func(ctx context.Context, question string) string) (*mcp.CallToolResult, error) {
-	reaped := ReapDoors(state)
-	// A latched grant is reask_access's job, not a login door's.
+	// A latched grant is reask_access's job, not a login door's. This
+	// check is a file read, so a latched call routes without browser I/O.
 	if state.Blocked() {
 		return mcpserver.ResultJSON(map[string]any{"door": "not-needed",
 			"error":  "iCloud is waiting for approval, not for a login: use reask_access instead of a login door",
-			"reaped": reaped})
+			"reaped": sweepExpired(state)})
 	}
+	reaped := ReapDoors(state)
 	// The door is only for a gone session. Anything else is a different
 	// outcome, named so the agent routes instead of guessing. Unreachable
 	// refuses too: with no browser answering there is no screen to sign

@@ -34,7 +34,7 @@ type ToolDef struct {
 	Asks        string
 }
 
-// Tools is the full 25-tool registry in README table order. Names are the
+// Tools is the full 31-tool registry in README table order. Names are the
 // frozen contract (README Tools table, openspec/changes/go-rewrite/specs/),
 // not invented here.
 var Tools = []ToolDef{
@@ -63,6 +63,12 @@ var Tools = []ToolDef{
 	{"drive_status", "When the Drive pull last ran and what it holds. Status only.", TierReadOnly, "no"},
 	{"reask_access", "Re-fire Apple's data-access prompt. Asks the owner first.", TierConfirmed, "yes"},
 	{"open_login", "Open the supervised VNC login door. Asks the owner first.", TierConfirmed, "yes"},
+	{"health_status", "Health store coverage and freshness, blind spots named.", TierReadOnly, "no"},
+	{"health_days", "Per-day steps, energy, resting heart rate, HRV.", TierReadOnly, "no"},
+	{"health_sleep", "Sleep by night, stage labels kept.", TierReadOnly, "no"},
+	{"health_effort", "Time above a heart-rate floor.", TierReadOnly, "no"},
+	{"health_recovery", "Recent window against a longer baseline.", TierReadOnly, "no"},
+	{"health_sql", "One read-only SELECT against the health store.", TierReadOnly, "no"},
 }
 
 // approveSchema carries one optional boolean;

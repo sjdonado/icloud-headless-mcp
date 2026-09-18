@@ -29,6 +29,8 @@ type Config struct {
 	DriveEtags     string // DRIVE_ETAGS, default $ICLOUD_STATE/state/drive-etags.json
 	DriveLibs      string // DRIVE_LIBRARIES, default "[]"
 	Transport      string // AGENT_MCP_TRANSPORT, default "stdio"
+	HealthDB       string // HEALTH_DB, default $ICLOUD_STATE/state/health.sqlite. Owned exclusively by this service account: the extension's importer is its sole writer, so never point it at another uid's live store; adopting one means copying it into place (operator, manual migrate).
+	HealthExport   string // HEALTH_EXPORT_DIR, default "" (extension off)
 }
 
 func getenv(key, def string) string {
@@ -80,6 +82,8 @@ func LoadEnv() *Config {
 	}
 	c.DriveStaging = getenv("DRIVE_STAGING", filepath.Join(c.StateDir, "drive-staging"))
 	c.DriveEtags = getenv("DRIVE_ETAGS", filepath.Join(c.StateDir, "state", "drive-etags.json"))
+	c.HealthDB = getenv("HEALTH_DB", filepath.Join(c.StateDir, "state", "health.sqlite"))
+	c.HealthExport = os.Getenv("HEALTH_EXPORT_DIR")
 	return c
 }
 

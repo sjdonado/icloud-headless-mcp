@@ -21,6 +21,7 @@ Notes and Reminders each hold their own per-app lock, because there is one brows
 | `internal/browser` | the CDP attach, the per-app locks, the blocked latch, quiet hours, the timezone override, and the tab reaper. Shared between the server handlers and the subcommands, and by nothing outside this directory |
 | `internal/drivefetch`, `internal/dvlibraries` | the Drive fetch mechanics and which libraries this install pulls |
 | `internal/queue`, `internal/drain` | the pending-write queue and the drain pass over it |
+| `internal/health` | the optional health extension: export importer, SQLite store, and six read-only tools. Only the importer opens the store read-write; the Drive layer never learns what it stages for it. The store file belongs to the service account exclusively: adopting another account's database means copying it into place, never pointing at it live |
 | `systemd/` | six units: the display, the browser, VNC and noVNC, and the tab reaper with its timer |
 | `sudoers.d/` | two rules: the one wrapper a caller may spawn, and the re-ask |
 

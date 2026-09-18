@@ -42,7 +42,7 @@ The full first-run sequence, including the two-factor login and Apple's Advanced
 
 ## Tools
 
-25 of them, on one server entry, so a Notes tool is `<prefix>_create_note` rather than living behind a second server. `list_calendars` first when the question is about the calendar, `drive_status` first when data pulled off Drive looks short.
+31 of them, on one server entry, so a Notes tool is `<prefix>_create_note` rather than living behind a second server. `list_calendars` first when the question is about the calendar, `drive_status` first when data pulled off Drive looks short. The last six cover the optional health extension and report unconfigured until it is set up.
 
 | Surface   | Tools                                                       | Tier                                                                                                                               | Asks?               |
 | --------- | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------------------- |
@@ -61,6 +61,8 @@ The full first-run sequence, including the two-factor login and Apple's Advanced
 | Drive     | `drive_status`                                              | read only. Status, never the pull                                                                                                  | No                  |
 | Recovery  | `reask_access`                                              | confirmed, through MCP elicitation. Re-fires Apple's data-access prompt; refuses unless iCloud is actually waiting, and never at night | Yes                 |
 | Recovery  | `open_login`                                                | confirmed, through MCP elicitation. Opens the supervised VNC login door: a link plus a one-time password, processes exit after 20 minutes | Yes                 |
+| Health    | `health_status`, `health_days`, `health_sleep`              | read only, out of the local health store; report unconfigured until the extension is set up                                             | No                  |
+| Health    | `health_effort`, `health_recovery`, `health_sql`            | read only, out of the local health store; `health_sql` takes one SELECT and refuses everything else                                   | No                  |
 
 There is no mail delete or move tool, no note edit or delete, and no tool that can trigger the Drive pull.
 
@@ -72,7 +74,7 @@ There is no mail delete or move tool, no note edit or delete, and no tool that c
 
 ## How it works
 
-One process serves all 25 tools. Notes and Reminders each hold their own per-app lock on the shared resident browser, while calendar, contacts and mail take no lock at all, so a Notes call never serialises a mail read behind it.
+One process serves all 31 tools. Notes and Reminders each hold their own per-app lock on the shared resident browser, while calendar, contacts and mail take no lock at all, so a Notes call never serialises a mail read behind it.
 
 The resident Chromium holds the iCloud session in memory and loads only `icloud.com` at startup, so a restart by itself costs nothing: no prompt is raised until the next app-page load, which is what asks Apple for the data-access grant. That is why the resident opens no app tab on its own, and why restarting the browser is a decision rather than a side effect. A fresh app-page load is refused from 23:00 through 06:59 owner-local so no prompt ever wakes the owner at night; already-loaded tabs keep working.
 
@@ -224,6 +226,10 @@ Confirmed tools (`delete_event`, `send_mail`, `update_note`) ask through MCP eli
 ## Dependencies
 
 One static binary, `icloud-mcp`, holding the server and every helper as subcommands (`icloud-mcp help` lists them). Building it needs a Go toolchain; running it needs only a system Chromium beside it. Rollback is reverting the bad merge on main: the next build republishes latest without it.
+
+## Health extension (optional, off unless configured)
+
+Point `HEALTH_EXPORT_DIR` at a staged Apple Health export folder (monthly JSONL per metric plus tombstone files, as the HealthMirror iOS app writes into Drive), and a daily timer imports it into SQLite at `HEALTH_DB` via `icloud-mcp health-import`. The six `health_*` tools then answer coverage, day rollups, sleep stages, effort, recovery, and one guarded read-only SELECT each. Empty means off: the importer no-ops and the tools report unconfigured. The backfill is a file, not a feature: save the official Apple export from agent chat into staging and the next import picks it up. Days are the export's own `localDate`, never a converted zone date; a metric that errored reports null with its reason, never zero. The extension owns its database exclusively: the importer is the sole writer and the tools open read-only, so `HEALTH_DB` must live under this service account. Adopting a database another account built means copying it into place with this account's ownership (a manual migrate by the operator), never pointing at the other account's live store. See `docs/SETUP.md` for the runbook.
 
 ## Verification
 

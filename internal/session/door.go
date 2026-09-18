@@ -124,8 +124,11 @@ func procAlive(pid int, want string) bool {
 	}
 	if stat, err := os.ReadFile(filepath.Join(procFS, strconv.Itoa(pid), "stat")); err == nil {
 		if i := strings.LastIndex(string(stat), ")"); i >= 0 {
-			if state := strings.Fields(string(stat)[i+1:]); len(state) > 0 && (state[0] == "Z" || state[0] == "X") {
-				return false
+			if state := strings.Fields(string(stat)[i+1:]); len(state) > 0 {
+				switch state[0] {
+				case "Z", "X", "x", "K", "W":
+					return false
+				}
 			}
 		}
 	}
@@ -169,11 +172,19 @@ func closeDoor(d *Door) {
 
 // killGroup kills a process group whose leader runs want. The cmdline
 // check guards recycled pids; the group (not the pid) guarantees wrapper
-// plus guarded server die together. A direct kill follows when the group
-// kill leaves the process standing, which is what doors started before
-// process groups existed need.
+// plus guarded server die together. The pgid check guards the reverse: a
+// recycled pid inside somebody else's group must never take that group
+// down, so a non-leader gets a direct kill only. A direct kill follows a
+// group kill that leaves the process standing, which is what doors
+// started before process groups existed need.
 func killGroup(pid int, want string) {
 	if !procAlive(pid, want) {
+		return
+	}
+	if pgid, err := syscall.Getpgid(pid); err != nil || pgid != pid {
+		if proc, err := os.FindProcess(pid); err == nil {
+			_ = proc.Kill()
+		}
 		return
 	}
 	_ = syscall.Kill(-pid, syscall.SIGKILL)
@@ -238,13 +249,15 @@ func sweepExpired(state browser.State) []string {
 		return nil
 	}
 	// liveDoor is nil for expired records and for dead processes alike;
-	// closeDoor is best-effort either way.
-	if time.Now().Unix() > d.Expires {
-		closeDoor(&d)
-		_ = os.Remove(doorRecord(state))
+	// closeDoor is best-effort either way, so a dead door never sits on
+	// its secret until TTL waiting for traffic.
+	expired := time.Now().Unix() > d.Expires
+	closeDoor(&d)
+	_ = os.Remove(doorRecord(state))
+	if expired {
 		return []string{"closed the expired login door"}
 	}
-	return nil
+	return []string{"removed a dead login door"}
 }
 
 // writeRecord stores the door atomically, so a crash cannot leave a

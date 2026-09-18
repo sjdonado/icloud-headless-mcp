@@ -1,0 +1,10 @@
+[Unit]
+Description=Import the staged Apple Health export daily
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=15m
+
+[Install]
+WantedBy=timers.target

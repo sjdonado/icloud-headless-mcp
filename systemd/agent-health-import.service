@@ -1,0 +1,8 @@
+[Unit]
+Description=Import the staged Apple Health export into SQLite
+
+[Service]
+Type=oneshot
+User=agent-icloud
+Group=agent-icloud
+ExecStart=/opt/agent-icloud/bin/icloud-mcp health-import

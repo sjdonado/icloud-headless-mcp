@@ -247,3 +247,23 @@ func TestKillGroupTakesWholeGroup(t *testing.T) {
 		t.Fatal("group kill left the process alive")
 	}
 }
+
+func TestSweepExpiredRemovesDeadDoor(t *testing.T) {
+	state, _ := testState(t)
+	passfile := filepath.Join(t.TempDir(), "vncpass")
+	if err := os.WriteFile(passfile, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Unexpired record, dead processes: the secret must not sit until TTL.
+	writeRawRecord(t, state, 1<<30, time.Now().Add(time.Hour).Unix(), passfile)
+	out := sweepExpired(state)
+	if len(out) != 1 {
+		t.Fatalf("dead door should sweep with one line, got %v", out)
+	}
+	if _, err := os.Stat(doorRecord(state)); !os.IsNotExist(err) {
+		t.Fatal("dead record survives its sweep")
+	}
+	if _, err := os.Stat(passfile); !os.IsNotExist(err) {
+		t.Fatal("dead door password file survives its sweep")
+	}
+}

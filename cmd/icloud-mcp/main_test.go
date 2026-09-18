@@ -23,7 +23,7 @@ func TestDispatch(t *testing.T) {
 func TestSubcommandsComplete(t *testing.T) {
 	want := []string{
 		"serve", "session-check", "resident", "login",
-		"reask", "drain", "tab-reaper", "drive-fetch",
+		"reask", "drain", "tab-reaper", "drive-fetch", "health-import",
 	}
 	if len(subcommands) != len(want) {
 		t.Errorf("subcommands has %d entries, want %d", len(subcommands), len(want))

@@ -11,7 +11,9 @@
 //	reask          re-ask Apple for web access by re-navigating, not restarting
 //	drain          run the writes deferred while the grant had lapsed
 //	tab-reaper     close app tabs idle longer than N minutes (default 15)
-//	drive-fetch    pull the configured Drive libraries into staging
+//	drive-fetch      pull the configured Drive libraries into staging
+//	health-import [--self-test]
+//	                 ingest the staged Apple Health export into SQLite
 //	version        print the build version
 //	help           print this list
 //
@@ -31,6 +33,7 @@ import (
 	"github.com/sjdonado/icloud-headless-mcp/internal/config"
 	"github.com/sjdonado/icloud-headless-mcp/internal/dav"
 	"github.com/sjdonado/icloud-headless-mcp/internal/drive"
+	"github.com/sjdonado/icloud-headless-mcp/internal/health"
 	"github.com/sjdonado/icloud-headless-mcp/internal/mail"
 	"github.com/sjdonado/icloud-headless-mcp/internal/mcpserver"
 	"github.com/sjdonado/icloud-headless-mcp/internal/notes"
@@ -56,6 +59,8 @@ Subcommands:
   tab-reaper [minutes]
                    close app tabs idle longer than minutes (default 15)
   drive-fetch      pull the configured Drive libraries into staging
+  health-import [--self-test]
+                   ingest the staged Apple Health export into SQLite
   version          print the build version
   help             print this list
 `
@@ -75,6 +80,7 @@ var subcommands = map[string]func([]string) int{
 	"drain":         func(args []string) int { return runDrain(args) },
 	"tab-reaper":    func(args []string) int { return runTabReaper(args) },
 	"drive-fetch":   func([]string) int { return runDriveFetch() },
+	"health-import": func(args []string) int { return runHealthImport(args) },
 }
 
 func run(args []string) int {
@@ -123,6 +129,9 @@ func runServe() {
 		handlers[name] = h
 	}
 	for name, h := range session.Handlers(cfg, ask) {
+		handlers[name] = h
+	}
+	for name, h := range health.Handlers(cfg) {
 		handlers[name] = h
 	}
 	srv = mcpserver.NewWithHandlers(handlers)
