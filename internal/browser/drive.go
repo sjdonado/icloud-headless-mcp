@@ -179,6 +179,95 @@ func mustJSON(v any) string {
 	return string(b)
 }
 
+// MainContextID returns the main world's execution context for a frame.
+// Isolated worlds see the DOM but not page JS globals (CloudKit lives
+// only in the main world), so snippets depending on page JavaScript must
+// run here. Enabling Runtime reports the existing contexts, which is what
+// identifies the frame's main world without guessing.
+func (c *wsConn) mainContextID(session, frameID string) (int, error) {
+	// Disable-then-enable: enable replays the existing contexts, but
+	// only on the transition. A second bare enable is a no-op that
+	// replays nothing, which is how back-to-back calls starved.
+	_ = c.call(session, "Runtime.disable", map[string]any{}, nil)
+	if err := c.call(session, "Runtime.enable", map[string]any{}, nil); err != nil {
+		return 0, err
+	}
+	deadline := nowMS() + 10000
+	for nowMS() < deadline {
+		msg, ok := c.nextEvent(2000)
+		if !ok {
+			continue
+		}
+		method, _ := msg["method"].(string)
+		if method != "Runtime.executionContextCreated" {
+			continue
+		}
+		params, _ := msg["params"].(map[string]any)
+		ctx, _ := params["context"].(map[string]any)
+		aux, _ := ctx["auxData"].(map[string]any)
+		isDefault, _ := aux["isDefault"].(bool)
+		if !isDefault {
+			continue
+		}
+		if fid, _ := aux["frameId"].(string); fid != "" && fid != frameID {
+			continue
+		}
+		if id, ok := ctx["id"].(float64); ok {
+			return int(id), nil
+		}
+	}
+	return 0, fmt.Errorf("no main execution context for frame")
+}
+
+// EvalMain runs a snippet in the frame's main world, for snippets that
+// depend on page JavaScript globals. Everything DOM-only stays in
+// isolated worlds via Eval.
+func (c *wsConn) evalMain(session, targetID, hint, expr string, arg any) (json.RawMessage, error) {
+	frames, err := c.frameIDs(session, targetID)
+	if err != nil {
+		return nil, err
+	}
+	frameID := ""
+	for _, f := range frames {
+		if hint == "" || strings.Contains(f.URL, hint) {
+			frameID = f.ID
+			break
+		}
+	}
+	if frameID == "" {
+		return nil, fmt.Errorf("no frame matching %q", hint)
+	}
+	contextID, err := c.mainContextID(session, frameID)
+	if err != nil {
+		return nil, err
+	}
+	args := []any{}
+	if arg != nil {
+		args = append(args, arg)
+	}
+	wrapped := fmt.Sprintf("(%s).apply(null, %s)", expr, mustJSON(args))
+	var eval struct {
+		Result struct {
+			Value json.RawMessage `json:"value"`
+		} `json:"result"`
+		Exception *struct {
+			Text string `json:"text"`
+		} `json:"exceptionDetails,omitempty"`
+	}
+	if err := c.call(session, "Runtime.evaluate", map[string]any{
+		"expression":    wrapped,
+		"contextId":     contextID,
+		"returnByValue": true,
+		"awaitPromise":  true,
+	}, &eval); err != nil {
+		return nil, err
+	}
+	if eval.Exception != nil {
+		return nil, fmt.Errorf("evaluate: %s", eval.Exception.Text)
+	}
+	return eval.Result.Value, nil
+}
+
 // TabAttach attaches to a tab target and returns its flattened session.
 // Detach when done; sessions are cheap but not free.
 func (c *wsConn) tabAttach(targetID string) (string, error) {

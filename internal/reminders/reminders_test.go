@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"compress/zlib"
 	"encoding/base64"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sjdonado/icloud-headless-mcp/internal/browser"
 )
 
 func TestSnippetsInterpolateCleanly(t *testing.T) {
@@ -162,5 +165,58 @@ func TestCheckDay(t *testing.T) {
 	}
 	if msg := c.checkDay("sometime later", when); msg != "" {
 		t.Fatalf("unrecognised form must not accuse: %q", msg)
+	}
+}
+
+func TestCkSyncFullThenIncremental(t *testing.T) {
+	dir := t.TempDir()
+	c := &Client{state: browser.State{Dir: dir, Shared: dir}}
+	calls := 0
+	eval := func(expr string, arg any) (json.RawMessage, error) {
+		calls++
+		switch {
+		case expr == ckZonesJS:
+			return json.Marshal([]any{
+				map[string]any{"scope": "private", "zoneName": "Reminders"},
+			})
+		default:
+			args, _ := arg.([]any)
+			tok, _ := args[1].(string)
+			if tok == "" {
+				return json.Marshal(map[string]any{
+					"token": "tok-1",
+					"changed": []any{
+						map[string]any{"n": "r1", "t": "Reminder", "c": true, "cd": 1758000000000.0,
+							"list": "l1", "title": "eGk="},
+						map[string]any{"n": "l1", "t": "List", "name": "Reminders"},
+					},
+					"gone": []any{},
+				})
+			}
+			return json.Marshal(map[string]any{
+				"token": "tok-2", "changed": []any{}, "gone": []any{},
+			})
+		}
+	}
+	cache, err := c.ckSyncEval(eval)
+	if err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	records, _ := cache["records"].(map[string]any)
+	if len(records) != 2 {
+		t.Fatalf("records = %v", records)
+	}
+	sync1, _ := cache["sync"].([]map[string]any)
+	if len(sync1) != 1 || sync1[0]["pass"] != "full" {
+		t.Fatalf("sync = %v", sync1)
+	}
+	// Second pass reuses the stored token: incremental, no refetch.
+	cache2, err := c.ckSyncEval(eval)
+	if err != nil {
+		t.Fatalf("sync2: %v", err)
+	}
+	sync2, _ := cache2["sync"].([]map[string]any)
+	if len(sync2) != 1 || sync2[0]["pass"] != "incremental" {
+		t.Fatalf("sync2 = %v", sync2)
 	}
 }

@@ -155,6 +155,13 @@ func (t *Tab) EvalJSON(expr string, arg any, out any) error {
 	}
 	return json.Unmarshal([]byte(s), out)
 }
+
+// EvalMain runs a snippet in the app frame's main world, for the rare
+// snippet that depends on page JavaScript globals (CloudKit). Everything
+// DOM-only uses Eval's isolated worlds.
+func (t *Tab) EvalMain(expr string, arg any) (json.RawMessage, error) {
+	return t.conn.evalMain(t.Session, t.TargetID, t.FrameURL, expr, arg)
+}
 func (t *Tab) MouseClick(x, y int) error {
 	return t.conn.mouseClick(t.Session, x, y)
 }

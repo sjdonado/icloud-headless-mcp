@@ -201,6 +201,10 @@ func (c *Client) ckCachePath() string {
 // per zone on the sync token. A refused token falls back to a full pass,
 // and the cache file is written atomically with mode 0600.
 func (c *Client) ckSync(tab *browser.Tab) (map[string]any, error) {
+	return c.ckSyncEval(tab.EvalMain)
+}
+
+func (c *Client) ckSyncEval(eval func(string, any) (json.RawMessage, error)) (map[string]any, error) {
 	cache := map[string]any{"tokens": map[string]any{}, "records": map[string]any{}}
 	if raw, err := os.ReadFile(c.ckCachePath()); err == nil {
 		var parsed map[string]any
@@ -214,7 +218,7 @@ func (c *Client) ckSync(tab *browser.Tab) (map[string]any, error) {
 	}
 	tokens := cache["tokens"].(map[string]any)
 	records := cache["records"].(map[string]any)
-	zonesRaw, err := tab.Eval(ckZonesJS, nil)
+	zonesRaw, err := eval(ckZonesJS, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -234,7 +238,7 @@ func (c *Client) ckSync(tab *browser.Tab) (map[string]any, error) {
 		key := scope + ":" + owner
 		token, _ := tokens[key]
 		syncOnce := func(tok any) (map[string]any, error) {
-			raw, err := tab.Eval(ckSyncJS, []any{zone, tok, ckKeys})
+			raw, err := eval(ckSyncJS, []any{zone, tok, ckKeys})
 			if err != nil {
 				return nil, err
 			}

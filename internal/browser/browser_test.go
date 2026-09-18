@@ -114,6 +114,21 @@ func (f *fakeCDP) serveWS(ws *nws.Conn) {
 			"Browser.grantPermissions", "Emulation.setTimezoneOverride", "Network.enable":
 			f.mu.Unlock()
 			f.reply(ws, id, map[string]any{})
+		case "Runtime.enable":
+			f.mu.Unlock()
+			f.reply(ws, id, map[string]any{})
+			// Existing contexts report on enable, which is what
+			// identifies the frame's main world.
+			raw, _ := json.Marshal(map[string]any{
+				"method": "Runtime.executionContextCreated",
+				"params": map[string]any{"context": map[string]any{
+					"id": 77,
+					"auxData": map[string]any{
+						"isDefault": true, "frameId": "F1",
+					},
+				}},
+			})
+			_ = ws.Write(context.Background(), nws.MessageText, raw)
 		case "Page.createIsolatedWorld":
 			f.mu.Unlock()
 			f.reply(ws, id, map[string]any{"executionContextId": 7})
@@ -408,4 +423,37 @@ func TestAppOpenSettlesGrowingList(t *testing.T) {
 	if n := fake.hits["Runtime.evaluate"]; n < 3 {
 		t.Fatalf("settle loop evaluated %d times, want >= 3", n)
 	}
+}
+
+func TestEvalMainFindsDefaultContext(t *testing.T) {
+	fake, srv, _ := newFakeCDP(t)
+	fake.targets = []Target{{ID: "t-app", Type: "page", URL: "https://www.icloud.com/reminders/"}}
+	fake.frameURLs["t-app"] = "https://www.icloud.com/reminders/reminders2.html"
+	fake.texts["t-app"] = "main-world-here"
+	state := testState(t)
+	state.CDP = srv.URL
+	cdp := NewCDP(srv.URL)
+	wsURL, err := cdp.DebuggerURL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := dialWS(wsURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.close()
+	session, err := conn.tabAttach("t-app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.tabDetach(session)
+	raw, err := conn.evalMain(session, "t-app", "reminders2", `() => "x"`, nil)
+	if err != nil {
+		t.Fatalf("evalMain: %v", err)
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil || s != "main-world-here" {
+		t.Fatalf("got %s, %v", raw, err)
+	}
+	_ = state
 }
