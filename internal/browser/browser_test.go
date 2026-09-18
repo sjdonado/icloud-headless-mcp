@@ -1,6 +1,7 @@
 package browser
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -10,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/net/websocket"
+	nws "nhooyr.io/websocket"
 )
 
 // fakeCDP scripts a browser: cookies, per-target frame text, and the tabs
@@ -50,25 +51,39 @@ func newFakeCDP(t *testing.T) (*fakeCDP, *httptest.Server, *CDP) {
 		f.closed = append(f.closed, strings.TrimPrefix(r.URL.Path, "/json/close/"))
 		w.WriteHeader(http.StatusOK)
 	})
-	mux.Handle("/ws", websocket.Handler(f.serveWS))
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		conn, err := nws.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close(nws.StatusNormalClosure, "")
+		f.serveWS(conn)
+	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return f, srv, NewCDP(srv.URL)
 }
 
-func (f *fakeCDP) reply(ws *websocket.Conn, id float64, result any) {
+func (f *fakeCDP) reply(ws *nws.Conn, id float64, result any) {
 	f.t.Helper()
-	if err := websocket.JSON.Send(ws, map[string]any{"id": id, "result": result}); err != nil {
+	raw, err := json.Marshal(map[string]any{"id": id, "result": result})
+	if err != nil {
+		f.t.Fatalf("fake marshal: %v", err)
+	}
+	if err := ws.Write(context.Background(), nws.MessageText, raw); err != nil {
 		f.t.Fatalf("fake send: %v", err)
 	}
 }
 
-func (f *fakeCDP) serveWS(ws *websocket.Conn) {
-	defer ws.Close()
+func (f *fakeCDP) serveWS(ws *nws.Conn) {
 	attached := ""
 	for {
+		_, data, err := ws.Read(context.Background())
+		if err != nil {
+			return
+		}
 		var msg map[string]any
-		if err := websocket.JSON.Receive(ws, &msg); err != nil {
+		if err := json.Unmarshal(data, &msg); err != nil {
 			return
 		}
 		method, _ := msg["method"].(string)
@@ -123,9 +138,10 @@ func (f *fakeCDP) serveWS(ws *websocket.Conn) {
 			f.reply(ws, id, map[string]any{"result": map[string]any{"value": value}})
 		default:
 			f.mu.Unlock()
-			_ = websocket.JSON.Send(ws, map[string]any{
+			raw, _ := json.Marshal(map[string]any{
 				"id": id, "error": map[string]any{"message": "unknown method " + method},
 			})
+			_ = ws.Write(context.Background(), nws.MessageText, raw)
 		}
 	}
 }

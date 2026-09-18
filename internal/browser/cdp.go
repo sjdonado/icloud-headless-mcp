@@ -1,6 +1,7 @@
 package browser
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/net/websocket"
+	ws "nhooyr.io/websocket"
 )
 
 // innerTextExpr reads a frame the way a person would: the rendered text,
@@ -22,37 +23,31 @@ const innerTextExpr = `(() => { try { return (document.body && document.body.inn
 // another call. Calls serialize on a mutex: without it concurrent calls
 // interleave sends and steal each other's replies.
 type wsConn struct {
-	ws      *websocket.Conn
+	ws      *ws.Conn
 	mu      sync.Mutex
 	next    int64
 	pending []map[string]any
 }
 
-func dialWS(url string) (*wsConn, error) {
-	ws, err := websocket.Dial(url, "", "http://localhost/")
+func dialWS(wsURL string) (*wsConn, error) {
+	// No Origin header, deliberately: Chromium's DevTools endpoint 403s
+	// any handshake carrying one and accepts handshakes without one.
+	// x/net/websocket always sends Origin and can never connect here,
+	// which is why this transport is nhooyr.
+	dialCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	conn, _, err := ws.Dial(dialCtx, wsURL, nil)
 	if err != nil {
 		return nil, err
 	}
-	return &wsConn{ws: ws}, nil
+	return &wsConn{ws: conn}, nil
 }
 
-func (c *wsConn) close() error { return c.ws.Close() }
+func (c *wsConn) close() error { return c.ws.Close(ws.StatusNormalClosure, "") }
 
 func nowMS() int64 { return time.Now().UnixNano() / 1e6 }
 
 func sleepMS(ms int) { time.Sleep(time.Duration(ms) * time.Millisecond) }
-
-// recvTimeout reads one message, giving up after ms. A timeout is a miss,
-// not an error: event listeners poll with it.
-func (c *wsConn) recvTimeout(ms int) (map[string]any, bool) {
-	_ = c.ws.SetReadDeadline(time.Now().Add(time.Duration(ms) * time.Millisecond))
-	defer c.ws.SetReadDeadline(time.Time{})
-	var raw map[string]any
-	if err := websocket.JSON.Receive(c.ws, &raw); err != nil {
-		return nil, false
-	}
-	return raw, true
-}
 
 func (c *wsConn) call(sessionID, method string, params, result any) error {
 	return c.callTimeout(sessionID, method, params, result, 300*time.Second)
@@ -79,58 +74,55 @@ func (c *wsConn) callTimeout(sessionID, method string, params, result any, timeo
 	if sessionID != "" {
 		msg["sessionId"] = sessionID
 	}
-	if err := websocket.JSON.Send(c.ws, msg); err != nil {
+	raw, err := json.Marshal(msg)
+	if err != nil {
 		return err
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
 	// Bounded: a stalled browser must surface as a timeout, never hang a
 	// lock-holding tool call forever. The default 300s clears the slowest
 	// legitimate call (a first CloudKit sync pass) with margin.
-	deadline := time.Now().Add(timeout)
+	if err := c.ws.Write(ctx, ws.MessageText, raw); err != nil {
+		return err
+	}
 	for {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return &callTimeoutError{method: method}
-		}
-		_ = c.ws.SetReadDeadline(time.Now().Add(minDuration(remaining, 30*time.Second)))
-		var raw map[string]any
-		if err := websocket.JSON.Receive(c.ws, &raw); err != nil {
-			if isTimeout(err) {
-				continue
+		_, data, err := c.ws.Read(ctx)
+		if err != nil {
+			if ctx.Err() == context.DeadlineExceeded {
+				return &callTimeoutError{method: method}
 			}
 			return err
 		}
-		if _, isEvent := raw["method"]; isEvent {
+		var reply map[string]any
+		if err := json.Unmarshal(data, &reply); err != nil {
+			continue
+		}
+		if _, isEvent := reply["method"]; isEvent {
 			// Queue, don't drop: request sniffing and crash watching
 			// read the stream between calls.
-			c.pending = append(c.pending, raw)
+			c.pending = append(c.pending, reply)
 			if len(c.pending) > 256 {
 				c.pending = c.pending[len(c.pending)-256:]
 			}
 			continue
 		}
-		gotID, _ := raw["id"].(float64)
+		gotID, _ := reply["id"].(float64)
 		if int(gotID) != id {
 			continue
 		}
-		if errmsg, ok := raw["error"].(map[string]any); ok {
+		if errmsg, ok := reply["error"].(map[string]any); ok {
 			return fmt.Errorf("CDP %s: %v", method, errmsg["message"])
 		}
 		if result == nil {
 			return nil
 		}
-		reb, err := json.Marshal(raw["result"])
+		reb, err := json.Marshal(reply["result"])
 		if err != nil {
 			return err
 		}
 		return json.Unmarshal(reb, result)
 	}
-}
-
-func minDuration(a, b time.Duration) time.Duration {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 type timeoutError interface{ Timeout() bool }
@@ -145,9 +137,14 @@ func (c *wsConn) nextEvent(timeoutMS int) (map[string]any, bool) {
 		c.pending = c.pending[1:]
 		return msg, true
 	}
-	_ = c.ws.SetReadDeadline(time.Now().Add(time.Duration(timeoutMS) * time.Millisecond))
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutMS)*time.Millisecond)
+	defer cancel()
+	_, data, err := c.ws.Read(ctx)
+	if err != nil {
+		return nil, false
+	}
 	var raw map[string]any
-	if err := websocket.JSON.Receive(c.ws, &raw); err != nil {
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, false
 	}
 	if _, isEvent := raw["method"]; !isEvent {
