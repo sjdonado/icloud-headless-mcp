@@ -13,7 +13,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
-// goldenToolNames is the 23-tool contract, frozen: change only alongside
+// goldenToolNames is the 25-tool contract, frozen: change only alongside
 // the spec, never by invention here.
 var goldenToolNames = []string{
 	"list_calendars", "list_events", "create_event", "update_event", "delete_event",
@@ -22,6 +22,7 @@ var goldenToolNames = []string{
 	"notes_folders", "notes_list", "notes_read", "notes_search", "update_note", "create_note",
 	"reminder_lists", "list_reminders", "completed_reminders", "complete_reminder", "create_reminder",
 	"drive_status",
+	"reask_access", "open_login",
 }
 
 func TestRegistryMatchesContract(t *testing.T) {
@@ -46,6 +47,7 @@ func TestRegistryMatchesContract(t *testing.T) {
 	}
 	for name, want := range map[string]string{
 		"delete_event": "yes", "send_mail": "yes", "update_note": "yes",
+		"reask_access": "yes", "open_login": "yes",
 		"update_event": "only-with-attendees",
 		"list_mail":    "no", "create_note": "no", "create_reminder": "no", "drive_status": "no",
 	} {

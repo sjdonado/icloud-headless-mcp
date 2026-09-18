@@ -23,6 +23,7 @@ import (
 	"github.com/sjdonado/icloud-headless-mcp/internal/config"
 	"github.com/sjdonado/icloud-headless-mcp/internal/mcpserver"
 	"github.com/sjdonado/icloud-headless-mcp/internal/queue"
+	"github.com/sjdonado/icloud-headless-mcp/internal/session"
 )
 
 const (
@@ -149,7 +150,11 @@ func (c *Client) withApp(ctx context.Context, fn func(tab *browser.Tab) (map[str
 		return approvalOrError(err), nil
 	}
 	defer tab.Close()
-	return fn(tab)
+	out, err := fn(tab)
+	if err == nil {
+		session.MaybeReap(c.state)
+	}
+	return out, err
 }
 
 func errResult(err error) map[string]any {
@@ -168,6 +173,9 @@ func shortError(err error) string {
 func approvalOrError(err error) map[string]any {
 	if _, ok := err.(*browser.NeedsApprovalError); ok {
 		return map[string]any{"error": err.Error(), "needs_device_approval": true}
+	}
+	if _, ok := err.(*browser.SignedOutError); ok {
+		return map[string]any{"error": err.Error(), "needs_login": true}
 	}
 	return errResult(err)
 }
@@ -1020,6 +1028,9 @@ func runClient(cfg *config.Config, ask func(ctx context.Context, question string
 	if err != nil {
 		if _, ok := err.(*browser.NeedsApprovalError); ok {
 			return mcpserver.ResultJSON(map[string]any{"error": err.Error(), "needs_device_approval": true})
+		}
+		if _, ok := err.(*browser.SignedOutError); ok {
+			return mcpserver.ResultJSON(map[string]any{"error": err.Error(), "needs_login": true})
 		}
 		return mcp.NewToolResultError(shortError(err)), nil
 	}

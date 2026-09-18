@@ -220,3 +220,17 @@ func TestCkSyncFullThenIncremental(t *testing.T) {
 		t.Fatalf("sync2 = %v", sync2)
 	}
 }
+
+func TestOpenErrorRoutesByFailure(t *testing.T) {
+	approval := openError(&browser.NeedsApprovalError{Msg: "waiting"})
+	if approval["needs_device_approval"] != true {
+		t.Fatalf("lapsed grant should carry needs_device_approval: %v", approval)
+	}
+	login := openError(&browser.SignedOutError{Msg: "expired"})
+	if login["needs_login"] != true {
+		t.Fatalf("expired session should carry needs_login: %v", login)
+	}
+	if _, ok := login["needs_device_approval"]; ok {
+		t.Fatalf("expired session must not carry needs_device_approval: %v", login)
+	}
+}
