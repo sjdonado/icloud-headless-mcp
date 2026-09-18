@@ -43,7 +43,7 @@ Then one tool per surface: `list_calendars`, `list_mail`, `reminder_lists`, `not
 
 Proven 2026-09-18 in the verify container (warm session, outside quiet hours) with a stdlib-only dummy agent that spawns the server exactly like Hermes does (child process, stdio pipes, 330s per-call budget) and runs `initialize`, `tools/list`, then the five calls above with `{}`. Reproduce it after any transport or registry change. This runs in the Linux container, not via production sudo: `ICLOUD_CDP` defaults to `http://127.0.0.1:9222`, and the state paths plus secrets file below are the container's own.
 
-Gate first: `session-check` must print `OK`, and the hour in `AGENT_TZ` must sit outside 23:00 through 06:59. Inside that window a call needing a fresh Notes/Reminders page load refuses by design (quiet hours); already-loaded tabs plus `list_calendars`, `list_mail`, and `drive_status` still answer. A refusal is not a failure, but it is not a green happy path either.
+Gate first: `session-check` must print `OK`, and the hour in `AGENT_TZ` must sit outside 23:00 through 06:59. Inside that window a call needing a fresh app-page load refuses by design (quiet hours); already-loaded tabs plus `list_calendars`, `list_mail`, and `drive_status` still answer. A refusal is not a failure, but it is not a green happy path either.
 
 ```
 CONTAINER=<name from `docker ps`>
@@ -76,7 +76,7 @@ Expect 7/7: server name `icloud-headless-mcp`, 23 tools, and all five calls answ
 Full list in `docs/ARCHITECTURE.md` Pitfalls; the load-bearing subset:
 
 - Chromium must run headed on a virtual display; headless reports a different user agent and kills the session server-side.
-- Fresh app-page loads refuse 23:00-07:00 local (quiet hours); already-loaded tabs still work.
+- Fresh app-page loads refuse 23:00 through 06:59 owner-local (quiet hours); already-loaded tabs still work.
 - CalDAV Reminders store is dead (writes succeed, invisible everywhere). Reminders stay browser-backed; never restore them on CalDAV.
 - Calendar listings need `expand=True`; convert ISO offsets into the named `AGENT_TZ` zone before writing (fixed offsets serialize as wrong UTC hours).
 - IMAP: check the select result (missing mailbox leaves AUTH state); flags come from separate `UID SEARCH`; server-side search is not substring search, `search_mail` unions server plus local decoded pass.

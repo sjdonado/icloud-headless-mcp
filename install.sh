@@ -78,7 +78,7 @@ fi
 if command -v apt-get >/dev/null 2>&1; then
   apt-get update
   apt-get install -y xvfb x11vnc novnc websockify
-  if ! command -v chromium >/dev/null 2>&1 && ! command -v chromium-browser >/dev/null 2>&1 && ! command -v google-chrome >/dev/null 2>&1; then
+  if [ -z "${CHROMIUM_BIN:-}" ] && ! command -v chromium >/dev/null 2>&1 && ! command -v chromium-browser >/dev/null 2>&1 && ! command -v google-chrome >/dev/null 2>&1; then
     apt-get install -y chromium
   fi
 elif ! command -v Xvfb >/dev/null 2>&1 || ! command -v x11vnc >/dev/null 2>&1 || { ! command -v chromium >/dev/null 2>&1 && ! command -v chromium-browser >/dev/null 2>&1 && ! command -v google-chrome >/dev/null 2>&1 && [ -z "${CHROMIUM_BIN:-}" ]; }; then

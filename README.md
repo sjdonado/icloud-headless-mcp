@@ -22,8 +22,8 @@ Protocol-only libraries such as the well-known `pyicloud` speak to Apple's priva
 
 An always-on Linux machine, and no screen needed. A small VPS is enough, and so is a Raspberry Pi: those are the setups this exists for. No toolchain lives on the host: the install is one static binary plus a system Chromium.
 
-- 64-bit. On any board a distribution Chromium is fine; where it is not on `PATH`, point `CHROMIUM_BIN` at it.
-- A virtual X display, because Chromium must run headed. Apple binds the session to the user agent and the headless build reports a different one.
+- 64-bit. A distribution Chromium is fine on any board, Pi included. The binary finds it via `CHROMIUM_BIN`, else `chromium`, `chromium-browser` or `google-chrome` on `PATH`, else the `PLAYWRIGHT_BROWSERS_PATH` browser root as a last resort (legacy; unset matches nothing). On a fresh apt machine `install.sh` installs the `chromium` package when none of those exist and `CHROMIUM_BIN` is unset; on a non-apt host install your distribution's Chromium first (or export `CHROMIUM_BIN`) or the installer refuses with that message.
+- A virtual X display, because Chromium must run headed. Apple binds the session to the user agent and the headless build reports a different one. `install.sh` installs `xvfb`, `x11vnc`, `novnc` and `websockify` for the display and the one interactive login; the VNC door binds loopback only and is stopped after use.
 - An Apple ID with an app-specific password, and a device you can approve prompts on during setup.
 - A private network between you and that machine, such as Tailscale or any other WireGuard-style network, before the first login. The first-time sign-in is done through a remote desktop onto a browser you are typing Apple credentials into, so it must never cross a public interface. See [`SECURITY.md`](SECURITY.md).
 - Nothing on the client side. It is an ordinary MCP server over stdio, it runs on the same host as the runtime that spawns it, and it needs no part of this repository to be present on whatever spawns it.
@@ -38,7 +38,7 @@ As root on the host, install the latest build in one line (rebuilt on every merg
 curl -fsSL https://raw.githubusercontent.com/sjdonado/icloud-headless-mcp/main/install.sh | sh
 ```
 
-That lays down the worked example this document describes (service account `agent-icloud`, `/opt/agent-icloud`, the browser stack) and enables it. A different account or prefix means the manual install below instead of this script.
+That lays down the worked example this document describes (service account `agent-icloud`, `/opt/agent-icloud`, the browser stack) and enables it. Yes, the script deals with the permissions: as root it creates the account, lays down agent-owned files (mode 755 under a mode-700 dir) plus the root-owned re-ask helper in `/usr/local/bin`, writes exactly the two shipped sudoers rules, installs the units, seeds a blank env file only when none exists yet, installs the X stack on the apt path and Chromium only when no browser is found, and enables `agent-xvfb`, `agent-browser` and `agent-tab-reaper.timer`. A different account or prefix means the manual install below instead of this script.
 
 The full first-run sequence, including the two-factor login and Apple's Advanced Data Protection grant, is in [`docs/SETUP.md`](docs/SETUP.md). Follow it once, end to end; two of its steps need you to be holding an Apple device.
 
@@ -72,7 +72,7 @@ There is no mail delete or move tool, no note edit or delete, and no tool that c
 
 One process serves all 23 tools. Notes and Reminders each hold their own per-app lock on the shared resident browser, while calendar, contacts and mail take no lock at all, so a Notes call never serialises a mail read behind it.
 
-The resident Chromium holds the iCloud session in memory and loads only `icloud.com` at startup, so a restart by itself costs nothing: no prompt is raised until the next app-page load, which is what asks Apple for the data-access grant. That is why the resident opens no app tab on its own, and why restarting the browser is a decision rather than a side effect. A fresh app-page load is refused between 23:00 and 07:00 local so no prompt ever wakes the owner at night; already-loaded tabs keep working.
+The resident Chromium holds the iCloud session in memory and loads only `icloud.com` at startup, so a restart by itself costs nothing: no prompt is raised until the next app-page load, which is what asks Apple for the data-access grant. That is why the resident opens no app tab on its own, and why restarting the browser is a decision rather than a side effect. A fresh app-page load is refused from 23:00 through 06:59 owner-local so no prompt ever wakes the owner at night; already-loaded tabs keep working.
 
 The Drive pull stages files for another account to import, and `drive_status` only reports on it: nothing here triggers the pull.
 
@@ -82,7 +82,7 @@ Internals (layout, session lifecycle, Drive mechanics, pitfalls) are in [`docs/A
 
 - **Restarting the browser is a decision, never a side effect.** Restarting `agent-browser`, `agent-xvfb`, `agent-vnc` or `agent-novnc` costs the session warmth plus a device approval.
 - **Chromium must run headed** on a virtual display; a headless relaunch reads as a different browser and the session dies server-side.
-- **Fresh app-page loads refuse 23:00-07:00 local.** Already-loaded tabs still work; that refusal is the quiet-hours rule working, not a failure.
+- **Fresh app-page loads refuse 23:00 through 06:59 owner-local.** Already-loaded tabs still work; that refusal is the quiet-hours rule working, not a failure.
 - **`needs_device_approval` is a refusal, not an empty list.** At the first login, tick "Trust this browser" or the session dies on the next relaunch.
 - **Never load the env file into the client's own service unit.** The calling uid must not be able to read the app-specific password.
 - **`AGENT_TZ` is load-bearing.** A guessed zone moves a reminder by hours and nothing errors.
@@ -112,11 +112,11 @@ One env file, owned by the account this runs as, mode 400, sourced by `stdio.sh`
 
 `AGENT_TZ` is load-bearing. A host may well run UTC while the owner does not, and Apple's web pickers store what they are typed as the page's zone, so the tools convert before typing; getting it wrong moves a reminder by hours and nothing errors.
 
-Three things the wrapper supplies and the env file does not, because they are about the host rather than the account: `DISPLAY` for the headed Chromium the browser-backed modules attach to, `PLAYWRIGHT_BROWSERS_PATH` for a shared root-owned Chromium rather than a per-account copy, and `HOME`, which every path default is under.
+Three things the wrapper supplies and the env file does not, because they are about the host rather than the account: `DISPLAY` for the headed Chromium the browser-backed modules attach to, `HOME`, which every path default is under, and the Chromium lookup (`CHROMIUM_BIN` first, then the `chromium` names on `PATH`; the `PLAYWRIGHT_BROWSERS_PATH` export it still carries is only the last-resort fallback for hosts that kept a Playwright browser root).
 
-## Install from scratch
+## Install from scratch (or audit the installer)
 
-A release tarball plus a system Chromium is the whole install. The paths and the account name below are one worked example and are install-time choices; a different prefix means changing it here, in `stdio.sh`, in the systemd units and in the sudoers rules together. `install.sh` does exactly this block for the worked example, so follow it by hand only when you deviate from it.
+This is what `install.sh` does, step by step, written for an apt host: not a second installer, but the same steps expanded so they can be audited, or followed by hand when you deviate from the worked example. A different prefix or account means changing it here, in `stdio.sh`, in the systemd units and in the sudoers rules together; a non-apt host substitutes its own packages and refuses without a browser, exactly like the script's other branch.
 
 ```
 ARCH=amd64  # or arm64 on a Pi
@@ -137,11 +137,13 @@ install -o agent-icloud -g agent-icloud -m 755 -t /opt/agent-icloud/bin \
   "$SRC/bin/agent-reask-access" "$SRC/bin/icloud-login.sh"
 install -o root -g root -m 700 "$SRC/bin/agent-reask-access" /usr/local/bin/agent-reask-access
 
-command -v chromium || command -v chromium-browser || command -v google-chrome || { apt-get update && apt-get install -y chromium; }
+apt-get update && apt-get install -y xvfb x11vnc novnc websockify  # the display and the one-time login door
+command -v chromium || command -v chromium-browser || command -v google-chrome || [ -n "${CHROMIUM_BIN:-}" ] || apt-get install -y chromium
+# Non-apt host: substitute your distribution's packages for the line above and set CHROMIUM_BIN if the browser lands outside PATH.
 
 install -m 600 "$SRC/.env.example" .env  # fill in the Apple ID, app-specific password, and AGENT_TZ
 install -d -m 755 /etc/agent
-install -o agent-icloud -g agent-icloud -m 400 .env /etc/agent/icloud.env
+if [ ! -f /etc/agent/icloud.env ]; then install -o agent-icloud -g agent-icloud -m 400 .env /etc/agent/icloud.env; fi  # never overwrite a filled env file
 rm -f .env  # the filled copy must not linger outside the service account's file
 install -o root -g root -m 440 "$SRC/sudoers.d/agent-icloud" /etc/sudoers.d/agent-icloud
 install -o root -g root -m 440 "$SRC/sudoers.d/agent-browser-restart" /etc/sudoers.d/agent-browser-restart
@@ -164,17 +166,52 @@ ssh -N -L 5901:localhost:5900 <host>
 
 Sign in through the loopback VNC, and **tick "Trust this browser"**: without it Apple never issues the remembered-browser cookie and the session dies on the next relaunch. Approve the data-access prompt on a device when it appears.
 
-Then configure your agent runtime, on this same machine, to spawn the wrapper, with a timeout above the runtime's own elicitation timeout. The command is the whole of it:
+## Connect a client
+
+The client must run on the same Linux host as the calling user `agent`: the sudoers rule allows exactly `agent`, and only `agent`, to spawn the wrapper as `agent-icloud`, and there is no network listener to reach across machines. Run your agent on the host itself (over SSH, or permanently); an agent on a laptop cannot reach this server.
+
+The command is the whole of it, with a timeout above the client's own elicitation timeout:
 
 ```
 sudo -n -u agent-icloud /opt/agent-icloud/bin/stdio.sh
 ```
 
-```json
-{"command": "sudo", "args": ["-n", "-u", "agent-icloud", "/opt/agent-icloud/bin/stdio.sh"], "timeout": 330}
+330 seconds is deliberate: a browser-backed call routinely takes 60 to 90 seconds and a cold app tab longer. Name the entry a valid identifier such as `icloud-headless-mcp`. Where each client takes its timeout differs, so it is set per client below; keep it above the client's own elicitation timeout either way.
+
+### Hermes
+
+In `~/.hermes/config.yaml`, under `mcp_servers`:
+
+```yaml
+mcp_servers:
+  icloud-headless-mcp:
+    command: "sudo"
+    args: ["-n", "-u", "agent-icloud", "/opt/agent-icloud/bin/stdio.sh"]
+    timeout: 330
 ```
 
-How that is written down is the runtime's business rather than this server's, and so is the name the entry is given: where a runtime prefixes tool names with that name, it has to be a valid identifier. 330 seconds is deliberate: a browser-backed call routinely takes 60 to 90 seconds and a cold app tab longer. In Hermes, register this as a stdio MCP server (for example under a name such as `icloud-headless-mcp`) using the same command and timeout; nothing Hermes-specific is required beyond that.
+`timeout` is seconds per tool call. Restart Hermes (or run `/reload-mcp`) after editing, then ask which MCP-backed tools are available to confirm the entry loaded. Nothing Hermes-specific is required beyond that.
+
+### OpenCode
+
+In `opencode.json` (or `opencode.jsonc`, global or project-level), under `mcp`:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "icloud-headless-mcp": {
+      "type": "local",
+      "command": ["sudo", "-n", "-u", "agent-icloud", "/opt/agent-icloud/bin/stdio.sh"],
+      "enabled": true
+    }
+  }
+}
+```
+
+Tools appear prefixed with the entry name (`icloud-headless-mcp_*`). This entry belongs in the OpenCode config on the Linux host, not on a laptop pointing at it: `type: local` spawns the command where OpenCode itself runs. OpenCode's `timeout` covers tool-list fetching only, so the block sets none: long browser calls simply run to completion.
+
+Confirmed tools (`delete_event`, `send_mail`, `update_note`) ask through MCP elicitation and execute only on explicit approval; a session that cannot ask gets a refusal and no write.
 
 ## Dependencies
 
@@ -191,7 +228,7 @@ sudo -u agent-icloud -H /opt/agent-icloud/bin/icloud-mcp session-check
 
 The first proves the sudo grant, the env file and the binary, from the uid that uses it: it should start and exit silently on EOF. The second reports whether the resident browser can actually reach iCloud data, and distinguishes the three answers that need different fixes: healthy, signed out, needs a device approval, or no browser to talk to.
 
-Then, with the account's environment, call the tools directly and expect all four surfaces to answer: `list_calendars`, `list_mail`, `reminder_lists`, `notes_folders`, `drive_status`. Between 23:00 and 07:00 local, `reminder_lists` refuses rather than raising a prompt on the owner's devices; that is the quiet-hours rule working, not a failure.
+Then, with the account's environment, call the tools directly and expect all five surfaces to answer: `list_calendars`, `list_mail`, `reminder_lists`, `notes_folders`, `drive_status`. From 23:00 through 06:59 owner-local, a call needing a fresh app-page load refuses rather than raising a prompt on the owner's devices; that is the quiet-hours rule working, not a failure.
 
 ## Deployments
 
