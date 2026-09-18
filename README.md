@@ -32,7 +32,7 @@ The real cost is Chromium's memory, and it is worth measuring rather than quotin
 
 ## Quick start
 
-As root on the host, install the latest release in one line:
+As root on the host, install the latest build in one line (rebuilt on every merge to main):
 
 ```
 curl -fsSL https://raw.githubusercontent.com/sjdonado/icloud-headless-mcp/main/install.sh | sh
@@ -119,34 +119,34 @@ Three things the wrapper supplies and the env file does not, because they are ab
 A release tarball plus a system Chromium is the whole install. The paths and the account name below are one worked example and are install-time choices; a different prefix means changing it here, in `stdio.sh`, in the systemd units and in the sudoers rules together. `install.sh` does exactly this block for the worked example, so follow it by hand only when you deviate from it.
 
 ```
-VERSION=v1.0.0  # the release tag you are installing
 ARCH=amd64  # or arm64 on a Pi
-TARBALL=icloud-headless-mcp-$VERSION-linux-$ARCH.tar.gz
-set -euo pipefail
-curl -fsSL -O https://github.com/sjdonado/icloud-headless-mcp/releases/download/$VERSION/$TARBALL
-curl -fsSL https://github.com/sjdonado/icloud-headless-mcp/releases/download/$VERSION/sha256sums.txt -o sha256sums.txt
+set -eu
+curl -fsSL https://github.com/sjdonado/icloud-headless-mcp/releases/latest/download/sha256sums.txt -o sha256sums.txt
+TARBALL=$(awk '{print $NF}' sha256sums.txt | grep -F "linux-$ARCH.tar.gz" | head -n 1)
+[ -n "$TARBALL" ] || { echo "no linux-$ARCH asset in this release" >&2; exit 1; }
+curl -fsSL -O "https://github.com/sjdonado/icloud-headless-mcp/releases/latest/download/$TARBALL"
 grep -F "$TARBALL" sha256sums.txt
 sha256sum -c --status --ignore-missing sha256sums.txt
-tar xzf $TARBALL
-SRC=icloud-headless-mcp-$VERSION-linux-$ARCH
+tar xzf "$TARBALL"
+SRC=${TARBALL%.tar.gz}
 
 id agent-icloud >/dev/null 2>&1 || useradd -r -m -d /opt/agent-icloud -s /usr/sbin/nologin agent-icloud
 install -d -o agent-icloud -g agent-icloud -m 700 /opt/agent-icloud/bin
 install -o agent-icloud -g agent-icloud -m 755 -t /opt/agent-icloud/bin \
-  $SRC/bin/icloud-mcp $SRC/bin/stdio.sh \
-  $SRC/bin/agent-reask-access $SRC/bin/icloud-login.sh
-install -o root -g root -m 700 $SRC/bin/agent-reask-access /usr/local/bin/agent-reask-access
+  "$SRC/bin/icloud-mcp" "$SRC/bin/stdio.sh" \
+  "$SRC/bin/agent-reask-access" "$SRC/bin/icloud-login.sh"
+install -o root -g root -m 700 "$SRC/bin/agent-reask-access" /usr/local/bin/agent-reask-access
 
 command -v chromium || command -v chromium-browser || command -v google-chrome || { apt-get update && apt-get install -y chromium; }
 
-install -m 600 $SRC/.env.example .env  # fill in the Apple ID, app-specific password, and AGENT_TZ
+install -m 600 "$SRC/.env.example" .env  # fill in the Apple ID, app-specific password, and AGENT_TZ
 install -d -m 755 /etc/agent
 install -o agent-icloud -g agent-icloud -m 400 .env /etc/agent/icloud.env
 rm -f .env  # the filled copy must not linger outside the service account's file
-install -o root -g root -m 440 $SRC/sudoers.d/agent-icloud /etc/sudoers.d/agent-icloud
-install -o root -g root -m 440 $SRC/sudoers.d/agent-browser-restart /etc/sudoers.d/agent-browser-restart
+install -o root -g root -m 440 "$SRC/sudoers.d/agent-icloud" /etc/sudoers.d/agent-icloud
+install -o root -g root -m 440 "$SRC/sudoers.d/agent-browser-restart" /etc/sudoers.d/agent-browser-restart
 visudo -c
-install -o root -g root -m 644 -t /etc/systemd/system $SRC/systemd/*
+install -o root -g root -m 644 -t /etc/systemd/system "$SRC"/systemd/*
 systemctl daemon-reload
 systemctl enable --now agent-xvfb agent-browser agent-tab-reaper.timer
 ```
@@ -178,7 +178,7 @@ How that is written down is the runtime's business rather than this server's, an
 
 ## Dependencies
 
-One static binary, `icloud-mcp`, holding the server and every helper as subcommands (`icloud-mcp help` lists them). Building it needs a Go toolchain; running it needs only a system Chromium beside it. Rollback is reinstalling the previous release: the same tarball steps with the older tag.
+One static binary, `icloud-mcp`, holding the server and every helper as subcommands (`icloud-mcp help` lists them). Building it needs a Go toolchain; running it needs only a system Chromium beside it. Rollback is reverting the bad merge on main: the next build republishes latest without it.
 
 ## Verification
 

@@ -1,17 +1,15 @@
-# Release: tag a version, get installable tarballs.
+# Build: every merge to main publishes installable tarballs.
 #
-#   git tag v1.0.0 && git push origin v1.0.0
-#
-# Each tag builds one static icloud-mcp per Linux arch, stamps the tag
-# into `icloud-mcp version`, and publishes both tarballs plus their
-# checksums to the GitHub Release. install.sh fetches those assets, so a
-# release exists if and only if install.sh can install it.
-name: release
+# Each main push builds one static icloud-mcp per Linux arch, stamps the
+# commit into `icloud-mcp version`, and republishes the rolling `latest`
+# GitHub Release. install.sh fetches those assets, so main is installable
+# if and only if this workflow is green.
+name: build
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
 
 permissions:
   contents: write
@@ -44,11 +42,14 @@ jobs:
           GOOS: linux
           GOARCH: ${{ matrix.arch }}
         run: |
-          go build -ldflags "-X main.version=${{ github.ref_name }}" \
+          VERSION="$(git rev-parse --short HEAD)"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          go build -ldflags "-X main.version=$VERSION" \
             -o dist/icloud-mcp ./cmd/icloud-mcp
       - name: package
         run: |
-          name="icloud-headless-mcp-${{ github.ref_name }}-linux-${{ matrix.arch }}"
+          : "${VERSION:?VERSION empty}"
+          name="icloud-headless-mcp-$VERSION-linux-${{ matrix.arch }}"
           mkdir -p "dist/$name/bin" "dist/$name/systemd" "dist/$name/sudoers.d"
           cp dist/icloud-mcp "dist/$name/bin/icloud-mcp"
           cp stdio.sh "dist/$name/bin/stdio.sh"
@@ -66,16 +67,23 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-latest
+    concurrency:
+      group: rolling-release
+      cancel-in-progress: false
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
       - run: cd dist && sha256sum *.tar.gz > sha256sums.txt
-      - run: >
-          gh release create "${{ github.ref_name }}"
-          --title "${{ github.ref_name }}"
-          --notes "One static binary per Linux arch plus the wrapper, units, and sudoers files install.sh lays down. See README for the installer command."
-          dist/*.tar.gz dist/sha256sums.txt
+      - name: republish rolling release
+        run: |
+          if gh release view latest >/dev/null 2>&1; then
+            gh release delete latest --yes --cleanup-tag
+          fi
+          gh release create latest --latest --target "${{ github.sha }}" \
+            --title "latest" \
+            --notes "Rolling build of main @ ${{ github.sha }} (\`icloud-mcp version\` prints the short form). One static binary per Linux arch plus the wrapper, units, and sudoers files install.sh lays down. See README for the installer command." \
+            dist/*.tar.gz dist/sha256sums.txt
         env:
           GH_TOKEN: ${{ github.token }}

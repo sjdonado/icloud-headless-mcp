@@ -1,11 +1,12 @@
 #!/bin/sh
-# Install icloud-headless-mcp from a GitHub Release in one line:
+# Install icloud-headless-mcp from the rolling latest build in one line:
 #
 #   curl -fsSL https://raw.githubusercontent.com/sjdonado/icloud-headless-mcp/main/install.sh | sh
 #
-# A pinned version instead of the latest:
-#
-#   curl -fsSL https://raw.githubusercontent.com/sjdonado/icloud-headless-mcp/main/install.sh | sh -s -- v1.0.0
+# Every merge to main republishes that release, so this always installs
+# latest main, stamped with its commit in `icloud-mcp version`. There are
+# no pinned versions: a pinning argument is refused rather than silently
+# installing latest.
 #
 # POSIX sh, run as root on the always-on Linux host. Lays down the worked
 # example from README (service account agent-icloud, /opt/agent-icloud,
@@ -14,9 +15,13 @@
 set -eu
 
 REPO="sjdonado/icloud-headless-mcp"
-VERSION="${1:-latest}"
 PREFIX="/opt/agent-icloud"
 ACCOUNT="agent-icloud"
+
+if [ $# -gt 0 ]; then
+  echo "pinned versions are gone with tag releases; this installs latest main" >&2
+  exit 1
+fi
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "run as root (it creates a service account and writes units):" >&2
@@ -36,17 +41,12 @@ for dep in curl tar sha256sum systemctl visudo useradd; do
   command -v "$dep" >/dev/null 2>&1 || { echo "missing dependency: $dep" >&2; exit 1; }
 done
 
-if [ "$VERSION" = "latest" ]; then
-  BASE="https://github.com/$REPO/releases/latest/download"
-else
-  BASE="https://github.com/$REPO/releases/download/$VERSION"
-  echo "installing $VERSION"
-fi
+BASE="https://github.com/$REPO/releases/latest/download"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT INT TERM
 cd "$tmp"
-# The asset name carries the release tag, which the latest redirect does
+# The asset name carries the build commit, which the latest redirect does
 # not reveal, so resolve it first: same directory, one glob, no jq.
 curl -fsSL "$BASE/sha256sums.txt" -o sha256sums.txt
 TARBALL="$(awk '{print $NF}' sha256sums.txt | grep -F "linux-$ARCH.tar.gz" | head -n 1)"
