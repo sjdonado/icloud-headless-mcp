@@ -1,6 +1,4 @@
-# iCloud Headless MCP Everywhere (`icloud-headless-mcp`)
-
-> Self-hosted MCP bridge exposing one iCloud account (Calendar, Contacts, Mail, Notes, Reminders, Drive status) to any MCP client over stdio. Runs on any always-on Linux host with no Apple hardware in the path, and reproduces the same way anywhere, including as an MCP server for Hermes.
+# iCloud Headless MCP
 
 **Run your iCloud apps from anywhere, not only from a Mac.** On a Mac mini you can script the local machine and drive the native apps, and that is the setup most iCloud automation quietly assumes. Off a Mac, iCloud is very hard to work with: Notes and Reminders have no API at all, and the surfaces that do have one are scattered across protocols. This project is the answer to that.
 
@@ -46,21 +44,21 @@ The full first-run sequence, including the two-factor login and Apple's Advanced
 
 23 of them, on one server entry, so a Notes tool is `<prefix>_create_note` rather than living behind a second server. `list_calendars` first when the question is about the calendar, `drive_status` first when data pulled off Drive looks short.
 
-| Surface | Tools | Tier | Asks? |
-| --- | --- | --- | --- |
-| Calendar | `list_calendars`, `list_events` | read only | No |
-| Calendar | `create_event` | silent | No |
-| Calendar | `update_event` | silent for an event the owner is alone on, confirmed when the event has other attendees, because moving it reaches their calendars | Only with attendees |
-| Calendar | `delete_event` | confirmed, through MCP elicitation | Yes |
-| Contacts | `search_contacts` | read only, over CardDAV | No |
-| Mail | `list_mailboxes`, `list_mail`, `read_mail`, `search_mail` | read only, over IMAP, and it never marks a message as seen | No |
-| Mail | `send_mail` | confirmed, through MCP elicitation | Yes |
-| Notes | `notes_folders`, `notes_list`, `notes_read`, `notes_search` | read only, on the browser | No |
-| Notes | `update_note` | confirmed. Replaces one note's body by selecting it and pasting, which leaves the app's own undo holding the old version | Yes |
-| Notes | `create_note` | silent, on the browser. Creates only: no tool here edits or deletes a note | No |
-| Reminders | `reminder_lists`, `list_reminders`, `completed_reminders` | read only, the first two on the browser and the third out of Apple's own records | No |
-| Reminders | `complete_reminder`, `create_reminder` | silent, on the browser, and each verifies its write against what the app shows | No |
-| Drive | `drive_status` | read only. Status, never the pull | No |
+| Surface   | Tools                                                       | Tier                                                                                                                               | Asks?               |
+| --------- | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------------------- |
+| Calendar  | `list_calendars`, `list_events`                             | read only                                                                                                                          | No                  |
+| Calendar  | `create_event`                                              | silent                                                                                                                             | No                  |
+| Calendar  | `update_event`                                              | silent for an event the owner is alone on, confirmed when the event has other attendees, because moving it reaches their calendars | Only with attendees |
+| Calendar  | `delete_event`                                              | confirmed, through MCP elicitation                                                                                                 | Yes                 |
+| Contacts  | `search_contacts`                                           | read only, over CardDAV                                                                                                            | No                  |
+| Mail      | `list_mailboxes`, `list_mail`, `read_mail`, `search_mail`   | read only, over IMAP, and it never marks a message as seen                                                                         | No                  |
+| Mail      | `send_mail`                                                 | confirmed, through MCP elicitation                                                                                                 | Yes                 |
+| Notes     | `notes_folders`, `notes_list`, `notes_read`, `notes_search` | read only, on the browser                                                                                                          | No                  |
+| Notes     | `update_note`                                               | confirmed. Replaces one note's body by selecting it and pasting, which leaves the app's own undo holding the old version           | Yes                 |
+| Notes     | `create_note`                                               | silent, on the browser. Creates only: no tool here edits or deletes a note                                                         | No                  |
+| Reminders | `reminder_lists`, `list_reminders`, `completed_reminders`   | read only, the first two on the browser and the third out of Apple's own records                                                   | No                  |
+| Reminders | `complete_reminder`, `create_reminder`                      | silent, on the browser, and each verifies its write against what the app shows                                                     | No                  |
+| Drive     | `drive_status`                                              | read only. Status, never the pull                                                                                                  | No                  |
 
 There is no mail delete or move tool, no note edit or delete, and no tool that can trigger the Drive pull.
 
@@ -94,21 +92,21 @@ For the whole list see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#pitfalls); 
 
 One env file, owned by the account this runs as, mode 400, sourced by `stdio.sh`. `.env.example` carries the long form of every key.
 
-| Key | What it is |
-| --- | --- |
-| `ICLOUD_APPLE_ID` | the Apple ID this server speaks for |
-| `ICLOUD_APP_PASSWORD` | an app-specific password from the Apple ID account page, revocable there without touching anything else. Not the primary Apple password |
-| `AGENT_TZ` | required, an IANA zone name. No default: a guessed zone types the wrong hour into an Apple picker and nothing errors |
-| `AGENT_TZ_FILE` | optional, a file holding the zone, which wins over `AGENT_TZ` whenever it holds anything, because a zone changes when the owner travels and a restart is not the moment to find out. Defaults to `/etc/agent/timezone`. Whatever writes it needs no access to this account |
-| `AGENT_DEFAULT_LIST` | which reminder list a reminder goes to when the caller names none |
-| `AGENT_DEFAULT_CALENDAR` | which calendar an event goes to when the caller names none. Set it: the fallback is whichever calendar sorts first, and on a real account that is often a shared one |
-| `ICLOUD_STATE` | everything this account writes for itself: the browser profile, the cookie jar, the per-app locks, the tab stamps. Defaults to `$HOME` |
-| `ICLOUD_SHARED_STATE` | state two uids share: the blocked latch, the ask log, and the queue of writes deferred while the grant had lapsed. A watchdog running as somebody else reads these, so it belongs outside this account's home. Defaults to `$HOME/shared-state`, which is right for a single-uid install only |
-| `ICLOUD_CDP` | where the resident Chromium listens for DevTools. Defaults to `http://127.0.0.1:9222` |
-| `MAIL_ATTACHMENTS_DIR` | where `read_mail(save_attachments=True)` writes. Shared: this server writes it and whichever uid stages a saved file reads it, so it is group-readable and never group-writable. Defaults to `$HOME/mail-attachments` |
-| `DRIVE_STAGING` | where the Drive pull leaves fetched files for another account to import. Defaults to `$ICLOUD_STATE/drive-staging` |
-| `DRIVE_ETAGS` | the file recording what has already been fetched. Defaults to `$ICLOUD_STATE/state/drive-etags.json` |
-| `DRIVE_LIBRARIES` | which Drive app folders to pull, as a JSON array. `folder` copies an arbitrary export folder recursively, while `tree` and `snapshot` support monthly and one-file exporters. These folders are deployment facts, not this server's. Empty means nothing is pulled |
+| Key                      | What it is                                                                                                                                                                                                                                                                                    |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ICLOUD_APPLE_ID`        | the Apple ID this server speaks for                                                                                                                                                                                                                                                           |
+| `ICLOUD_APP_PASSWORD`    | an app-specific password from the Apple ID account page, revocable there without touching anything else. Not the primary Apple password                                                                                                                                                       |
+| `AGENT_TZ`               | required, an IANA zone name. No default: a guessed zone types the wrong hour into an Apple picker and nothing errors                                                                                                                                                                          |
+| `AGENT_TZ_FILE`          | optional, a file holding the zone, which wins over `AGENT_TZ` whenever it holds anything, because a zone changes when the owner travels and a restart is not the moment to find out. Defaults to `/etc/agent/timezone`. Whatever writes it needs no access to this account                    |
+| `AGENT_DEFAULT_LIST`     | which reminder list a reminder goes to when the caller names none                                                                                                                                                                                                                             |
+| `AGENT_DEFAULT_CALENDAR` | which calendar an event goes to when the caller names none. Set it: the fallback is whichever calendar sorts first, and on a real account that is often a shared one                                                                                                                          |
+| `ICLOUD_STATE`           | everything this account writes for itself: the browser profile, the cookie jar, the per-app locks, the tab stamps. Defaults to `$HOME`                                                                                                                                                        |
+| `ICLOUD_SHARED_STATE`    | state two uids share: the blocked latch, the ask log, and the queue of writes deferred while the grant had lapsed. A watchdog running as somebody else reads these, so it belongs outside this account's home. Defaults to `$HOME/shared-state`, which is right for a single-uid install only |
+| `ICLOUD_CDP`             | where the resident Chromium listens for DevTools. Defaults to `http://127.0.0.1:9222`                                                                                                                                                                                                         |
+| `MAIL_ATTACHMENTS_DIR`   | where `read_mail(save_attachments=True)` writes. Shared: this server writes it and whichever uid stages a saved file reads it, so it is group-readable and never group-writable. Defaults to `$HOME/mail-attachments`                                                                         |
+| `DRIVE_STAGING`          | where the Drive pull leaves fetched files for another account to import. Defaults to `$ICLOUD_STATE/drive-staging`                                                                                                                                                                            |
+| `DRIVE_ETAGS`            | the file recording what has already been fetched. Defaults to `$ICLOUD_STATE/state/drive-etags.json`                                                                                                                                                                                          |
+| `DRIVE_LIBRARIES`        | which Drive app folders to pull, as a JSON array. `folder` copies an arbitrary export folder recursively, while `tree` and `snapshot` support monthly and one-file exporters. These folders are deployment facts, not this server's. Empty means nothing is pulled                            |
 
 `AGENT_TZ` is load-bearing. A host may well run UTC while the owner does not, and Apple's web pickers store what they are typed as the page's zone, so the tools convert before typing; getting it wrong moves a reminder by hours and nothing errors.
 
@@ -202,7 +200,13 @@ In `opencode.json` (or `opencode.jsonc`, global or project-level), under `mcp`:
   "mcp": {
     "icloud-headless-mcp": {
       "type": "local",
-      "command": ["sudo", "-n", "-u", "agent-icloud", "/opt/agent-icloud/bin/stdio.sh"],
+      "command": [
+        "sudo",
+        "-n",
+        "-u",
+        "agent-icloud",
+        "/opt/agent-icloud/bin/stdio.sh"
+      ],
       "enabled": true
     }
   }

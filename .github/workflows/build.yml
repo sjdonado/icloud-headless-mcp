@@ -71,6 +71,12 @@ jobs:
       group: rolling-release
       cancel-in-progress: false
     steps:
+      # gh release create resolves --target through git, so this job needs
+      # the repo checked out (push-event tip == the target SHA; full history
+      # so a re-run behind a newer push still has the pinned object).
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           path: dist
