@@ -168,3 +168,28 @@ Section 9 assumes you can reach the host. When the agent runs somewhere you cann
 ## 10. Configure your agent runtime (Hermes or any MCP client) to spawn `stdio.sh`
 
 That is the last step, and it is the only one this document cannot write for you. This server is a child process of the runtime that drives it, on this same machine, so what remains is telling that runtime to spawn `sudo -n -u <service account> /opt/agent-icloud/bin/stdio.sh` with a timeout above 300 seconds. Give the entry a name that is a valid identifier such as `icloud-headless-mcp`: a runtime that prefixes tool names with it needs one. Copy-paste entries for Hermes and OpenCode are in the README's `Connect a client` section; the same entry pattern on another host with its own install works the same way.
+
+## 11. Optional: health extension
+
+Skip this unless Apple Health data should be queryable. The extension reads a staged export folder, never the phone and never Drive directly.
+
+Set the export directory to the staged folder (for example a HealthMirror app folder under `DRIVE_STAGING`), leaving `HEALTH_DB` at its default unless the state layout deviates:
+
+```
+HEALTH_EXPORT_DIR=/opt/agent-icloud/drive-staging/<dest>
+```
+
+Backfill once: save the official Apple export from agent chat into staging (beside the continuous-push folder, same layout) and import by hand to prove the plumbing:
+
+```
+sudo -u agent-icloud -H /opt/agent-icloud/bin/icloud-mcp health-import
+sudo -u agent-icloud -H /opt/agent-icloud/bin/icloud-mcp health-import --self-test
+```
+
+The first prints per-file seen/new counts; the second runs the six contract checks with no files touched. Then enable the daily timer and confirm the tools answer (unconfigured until the first import lands, never zeros):
+
+```
+sudo systemctl enable --now agent-health-import.timer
+```
+
+The timer unit shipped with the rest of `systemd/`; enabling it is the only step the installer leaves to you, because an import schedule is a deployment choice. The Drive pull's own scheduling stays yours and stays separate.

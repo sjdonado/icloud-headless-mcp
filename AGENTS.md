@@ -48,7 +48,7 @@ Gate first: `session-check` must print `OK`, and the hour in `AGENT_TZ` must sit
 ```
 CONTAINER=<name from `docker ps`>
 ARCH=$(docker version --format '{{.Server.Arch}}')  # amd64 or arm64, matching GOARCH names
-GOOS=linux GOARCH=$ARCH go build -ldflags "-X main.version=$(git rev-parse --short HEAD)" -o /tmp/icloud-mcp-happy ./cmd/icloud-mcp
+GOOS=linux GOARCH=$ARCH go build -trimpath -buildvcs=false -ldflags "-X main.version=$(git rev-parse --short HEAD)" -o /tmp/icloud-mcp-happy ./cmd/icloud-mcp
 docker cp /tmp/icloud-mcp-happy "$CONTAINER:/tmp/icloud-mcp-happy"
 docker exec "$CONTAINER" bash -c 'set -a && . /secrets/icloud.env && set +a && export ICLOUD_STATE=<state> ICLOUD_SHARED_STATE=<shared> && /tmp/icloud-mcp-happy session-check'
 ```
@@ -63,7 +63,7 @@ docker exec "$CONTAINER" bash -c 'set -a && . /secrets/icloud.env && set +a && e
 sleep 150; docker exec "$CONTAINER" cat /tmp/happy.log
 ```
 
-Expect 10/10: initialize, tools/list (25 tools including the two recovery tools), five surface calls, and the two recovery refusals. Parse each `result.content[0].text` as JSON and require no `error`, no `needs_device_approval`, and no `needs_login` key on the five data calls. Keys seen: `list_calendars` carries `calendars`; `list_mail` carries `mailbox`, `count`, `matched`; `reminder_lists` carries `count`, `lists`; `notes_folders` carries `count`, `folders`; `drive_status` carries `last_pull`, `stale`, `schedule`, `files_tracked`, `libraries` (`stale: null` means never pulled, `{}` libraries is healthy-empty). Then the two recovery refusals, deterministic on a healthy session with a clear latch and no elicitation: `reask_access` answers `reasked: false` naming nothing-to-re-ask, `open_login` answers `door: not-needed`. Browser-backed calls take 60-90s each.
+Expect 15/15: initialize, tools/list (31 tools including recovery plus health), five surface calls, the two recovery refusals, and six health tools answering unconfigured (no export in the rig). Parse each `result.content[0].text` as JSON and require no `error`, no `needs_device_approval`, and no `needs_login` key on the five data calls. Keys seen: `list_calendars` carries `calendars`; `list_mail` carries `mailbox`, `count`, `matched`; `reminder_lists` carries `count`, `lists`; `notes_folders` carries `count`, `folders`; `drive_status` carries `last_pull`, `stale`, `schedule`, `files_tracked`, `libraries` (`stale: null` means never pulled, `{}` libraries is healthy-empty). Then the two recovery refusals, deterministic on a healthy session with a clear latch and no elicitation: `reask_access` answers `reasked: false` naming nothing-to-re-ask, `open_login` answers `door: not-needed`. Browser-backed calls take 60-90s each.
 
 ## Change guidance
 
