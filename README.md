@@ -1,6 +1,6 @@
 # iCloud Headless MCP Everywhere (`icloud-headless-mcp`)
 
-> Self-hosted MCP bridge exposing one iCloud account (Calendar, Contacts, Mail, Notes, Reminders, Drive status) to any MCP client over stdio. Runs on any always-on Linux host with no Apple hardware in the path, and reproduces the same way anywhere, including as an MCP server for Hermes.
+> Run your iCloud from anywhere, no Mac required. One self-hosted MCP server over stdio for Mail, Calendar, Contacts, Notes, Reminders and Drive: approval-gated writes, reproducible on any always-on Linux host, including Hermes.
 
 **Run your iCloud apps from anywhere, not only from a Mac.** On a Mac mini you can script the local machine and drive the native apps, and that is the setup most iCloud automation quietly assumes. Off a Mac, iCloud is very hard to work with: Notes and Reminders have no API at all, and the surfaces that do have one are scattered across protocols. This project is the answer to that.
 
