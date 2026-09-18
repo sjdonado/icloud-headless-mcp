@@ -1,0 +1,81 @@
+# Release: tag a version, get installable tarballs.
+#
+#   git tag v1.0.0 && git push origin v1.0.0
+#
+# Each tag builds one static icloud-mcp per Linux arch, stamps the tag
+# into `icloud-mcp version`, and publishes both tarballs plus their
+# checksums to the GitHub Release. install.sh fetches those assets, so a
+# release exists if and only if install.sh can install it.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test ./...
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          go build -ldflags "-X main.version=${{ github.ref_name }}" \
+            -o dist/icloud-mcp ./cmd/icloud-mcp
+      - name: package
+        run: |
+          name="icloud-headless-mcp-${{ github.ref_name }}-linux-${{ matrix.arch }}"
+          mkdir -p "dist/$name/bin" "dist/$name/systemd" "dist/$name/sudoers.d"
+          cp dist/icloud-mcp "dist/$name/bin/icloud-mcp"
+          cp stdio.sh "dist/$name/bin/stdio.sh"
+          cp bin/agent-reask-access bin/icloud-login.sh "dist/$name/bin/"
+          cp systemd/* "dist/$name/systemd/"
+          cp sudoers.d/* "dist/$name/sudoers.d/"
+          cp .env.example LICENSE "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          rm -rf "dist/$name" dist/icloud-mcp
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.arch }}
+          path: dist/*.tar.gz
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: cd dist && sha256sum *.tar.gz > sha256sums.txt
+      - run: >
+          gh release create "${{ github.ref_name }}"
+          --title "${{ github.ref_name }}"
+          --notes "One static binary per Linux arch plus the wrapper, units, and sudoers files install.sh lays down. See README for the installer command."
+          dist/*.tar.gz dist/sha256sums.txt
+        env:
+          GH_TOKEN: ${{ github.token }}

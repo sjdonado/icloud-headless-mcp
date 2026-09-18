@@ -8,8 +8,8 @@ import (
 )
 
 // This file extends the raw CDP session with driving primitives: frames,
-// input, navigation, and event listening. Everything the tools do through
-// Playwright maps to one of these; nothing here needs a driver library.
+// input, navigation, and event listening. Everything the tools do over CDP
+// goes through one of these; nothing here needs a driver library.
 
 // CollectJS returns elements matching an exact class token, from every open
 // shadow root. Substring class matching catches wrappers that repeat every

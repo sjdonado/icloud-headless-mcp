@@ -3,8 +3,7 @@ package reminders
 import "fmt"
 
 // Selector and flow snippets for the Reminders web app, probed on the live
-// app. Copied verbatim with the Python implementation; the DOM is the
-// contract here, not the language.
+// app. The DOM is the contract here, not the language.
 //
 // The flow snippets share one shadow-DOM walker, interpolated where each
 // snippet holds a %s. snippetTests in reminders_test.go guards the

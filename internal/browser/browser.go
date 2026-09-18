@@ -4,7 +4,7 @@
 //
 // Browser DRIVING (DOM, clicks, app flows) is Phase 4 and lives behind the
 // driver decision. Everything here is driver-neutral: plain CDP over HTTP
-// plus a minimal websocket client, so session_check, the tab reaper, and
+// plus a minimal websocket client, so session-check, the tab reaper, and
 // the drain work regardless of which driver wins the spike.
 package browser
 

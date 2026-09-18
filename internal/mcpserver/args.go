@@ -110,8 +110,8 @@ func (a Args) StrOr(name, def string) (string, error) {
 	return *s, nil
 }
 
-// TruncateRunes cuts s to n characters. Python slices str (characters);
-// byte slicing splits multi-byte text mid-rune.
+// TruncateRunes cuts s to n characters, not bytes: byte slicing splits
+// multi-byte text mid-rune.
 func TruncateRunes(s string, n int) string {
 	runes := []rune(s)
 	if len(runes) <= n {
@@ -120,8 +120,8 @@ func TruncateRunes(s string, n int) string {
 	return string(runes[:n])
 }
 
-// ErrorResult renders a domain error the way the Python tools do: a result
-// carrying {"error": ...}, not a protocol-level failure.
+// ErrorResult renders a domain error by convention: a result carrying
+// {"error": ...}, not a protocol-level failure.
 func ErrorResult(msg string) (*mcp.CallToolResult, error) {
 	b, err := json.Marshal(map[string]any{"error": msg})
 	if err != nil {

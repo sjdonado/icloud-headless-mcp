@@ -11,7 +11,8 @@ import (
 
 // fakeDAV is an in-process CalDAV/CardDAV server. It implements exactly the
 // discovery chain and object operations the Client uses, with fixed fixtures
-// chosen to exercise the parity behaviors: recurring expansion, attendee
+// chosen to exercise the behaviors pinned in
+// openspec/changes/go-rewrite/specs/: recurring expansion, attendee
 // approval, the non-<uid>.ics fallback lookup, and contact matching.
 type fakeDAV struct {
 	t *testing.T
@@ -22,6 +23,9 @@ type fakeDAV struct {
 	// REPORT request bodies by path, for asserting the client asked for
 	// expansion and windowed filters.
 	reports map[string][]string
+	// GET paths to fail with the given status, for proving transport
+	// errors surface instead of reading as empty.
+	failGET map[string]int
 	// PUT bodies by path, for asserting SEQUENCE bumps and in-place writes.
 	puts    map[string]string
 	deleted []string
@@ -70,6 +74,11 @@ const (
 
 	fxGrace = "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Grace Hopper\r\n" +
 		"EMAIL:grace@navy.mil\r\nTEL:+15551234567\r\nEND:VCARD\r\n"
+
+	// fxBroken is a card no parser accepts. It lives in the book only in
+	// the test that pins skip-broken behavior; the shared book stays clean
+	// so the match table exercises the single-REPORT fast path.
+	fxBroken = "BEGIN:VCARD\r\nFN:No End In Sight\r\n"
 )
 
 func newFakeDAV(t *testing.T) (*fakeDAV, *httptest.Server) {
@@ -156,6 +165,21 @@ func (f *fakeDAV) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 						`</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>`)
 			}
 		case strings.HasPrefix(path, "/books/"):
+			if strings.Contains(string(body), "sync-collection") {
+				// A sync with no data request: hrefs and etags only, no
+				// bodies. What the per-card fallback enumerates.
+				for href := range f.objects {
+					if !strings.HasPrefix(href, path) || !strings.HasSuffix(href, ".vcf") {
+						continue
+					}
+					responses = append(responses,
+						`<D:response><D:href>`+href+`</D:href><D:propstat><D:prop>`+
+							`<D:getetag>"v1"</D:getetag>`+
+							`</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>`)
+				}
+				responses = append(responses, `<D:sync-token>fake-token</D:sync-token>`)
+				break
+			}
 			for href, vcf := range f.objects {
 				if !strings.HasPrefix(href, path) || !strings.HasSuffix(href, ".vcf") {
 					continue
@@ -172,6 +196,10 @@ func (f *fakeDAV) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		f.multistatus(w, responses...)
 	case "GET":
+		if code, ok := f.failGET[path]; ok {
+			w.WriteHeader(code)
+			return
+		}
 		body, ok := f.objects[path]
 		if !ok {
 			http.NotFound(w, r)

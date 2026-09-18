@@ -6,4 +6,4 @@ After=agent-browser.service
 Type=oneshot
 User=agent-icloud
 Group=agent-icloud
-ExecStart=/opt/agent-icloud/.venv/bin/python /opt/agent-icloud/bin/tab_reaper.py 15
+ExecStart=/opt/agent-icloud/bin/icloud-mcp tab-reaper 15

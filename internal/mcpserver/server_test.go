@@ -13,8 +13,8 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
-// goldenToolNames is the 23-tool contract. Names are derived from the Python
-// @mcp.tool definitions (rg '@mcp.tool' -A1 tools/*.py), not invented here.
+// goldenToolNames is the 23-tool contract, frozen: change only alongside
+// the spec, never by invention here.
 var goldenToolNames = []string{
 	"list_calendars", "list_events", "create_event", "update_event", "delete_event",
 	"search_contacts",

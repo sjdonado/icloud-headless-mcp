@@ -1,5 +1,5 @@
-// Command icloud-tab-reaper closes app tabs idle longer than the given
-// threshold in minutes (default 15), keeping browser warmth within a
+// Subcommand tab-reaper (icloud-mcp tab-reaper) closes app tabs idle
+// longer than N minutes (default 15), keeping browser warmth within a
 // working session. Every tool entry point touches its app's stamp file so
 // a tab is never closed mid-session.
 package main
@@ -13,13 +13,13 @@ import (
 	"github.com/sjdonado/icloud-headless-mcp/internal/browser"
 )
 
-func main() {
+func runTabReaper(args []string) int {
 	idleMinutes := 15
-	if len(os.Args) > 1 {
-		n, err := strconv.Atoi(os.Args[1])
+	if len(args) > 0 {
+		n, err := strconv.Atoi(args[0])
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "bad idle minutes %q: %v\n", os.Args[1], err)
-			os.Exit(2)
+			fmt.Fprintf(os.Stderr, "bad idle minutes %q: %v\n", args[0], err)
+			return 2
 		}
 		idleMinutes = n
 	}
@@ -28,7 +28,7 @@ func main() {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "no state directory: %v\n", err)
-			os.Exit(2)
+			return 2
 		}
 		stateDir = home
 	}
@@ -41,4 +41,5 @@ func main() {
 	for _, line := range state.Reap(browser.NewCDP(cdpURL), idleMinutes, time.Now()) {
 		fmt.Println(line)
 	}
+	return 0
 }

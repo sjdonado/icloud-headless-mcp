@@ -1,4 +1,4 @@
-// Command icloud-drive-fetch pulls the configured Drive libraries and
+// Subcommand drive-fetch (icloud-mcp drive-fetch) pulls the configured Drive libraries and
 // stages files for another account to import. Exit 0 fetched, 1 nothing,
 // 2 not runnable, 3 quiet hours.
 package main
@@ -24,11 +24,7 @@ func httpClient() *http.Client {
 	return &http.Client{Timeout: 120 * time.Second}
 }
 
-func main() {
-	os.Exit(run())
-}
-
-func run() int {
+func runDriveFetch() int {
 	cfg := config.LoadEnv()
 	state := browser.State{Dir: cfg.StateDir, Shared: cfg.SharedState, CDP: cfg.CDP}
 	zone, err := cfg.LocalTimezone()

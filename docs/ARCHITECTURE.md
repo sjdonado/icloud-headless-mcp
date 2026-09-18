@@ -10,17 +10,21 @@ Notes and Reminders each hold their own per-app lock, because there is one brows
 
 | Path | What it is |
 | --- | --- |
-| `server.py` | imports the five tool modules and runs the transport. Importing a module is what registers its tools |
-| `app.py` | the one `MCPServer`, the account's env contract, `ask_approval`, and the `YYYY-MM-DD` parser both protocol modules use |
-| `tools/dav.py` | calendar and contacts over CalDAV and CardDAV, and the confirmed delete |
-| `tools/mail.py` | mail over IMAP, and the confirmed send |
-| `tools/notes.py` | Notes, through the browser |
-| `tools/reminders.py` | Reminders, through the browser and through CloudKit for completions |
-| `tools/drive.py` | `drive_status`, and nothing that touches the pull |
-| `icloud_lib/` | the CDP attach, the per-app locks, the blocked latch, quiet hours, the timezone override, the pending-write queue, and which Drive libraries this install pulls. Shared between the server modules and the `bin/` helpers, and by nothing outside this directory |
-| `bin/` | the browser plumbing: the resident, the session bootstrap and login, the session check, the re-ask, the drain, the tab reaper and the Drive fetch |
+| `cmd/icloud-mcp` | the one static binary: the server (default, no subcommand) and every helper as subcommands (`session-check`, `resident`, `login`, `reask`, `drain`, `tab-reaper`, `drive-fetch`). `icloud-mcp help` lists them |
+| `internal/mcpserver` | the one `MCPServer`, the transport, and the elicitation approval gate |
+| `internal/config` | the account's env contract |
+| `internal/dav` | calendar and contacts over CalDAV and CardDAV, and the confirmed delete |
+| `internal/mail` | mail over IMAP, and the confirmed send |
+| `internal/notes` | Notes, through the browser |
+| `internal/reminders` | Reminders, through the browser and through CloudKit for completions |
+| `internal/drive` | `drive_status`, and nothing that touches the pull |
+| `internal/browser` | the CDP attach, the per-app locks, the blocked latch, quiet hours, the timezone override, and the tab reaper. Shared between the server handlers and the subcommands, and by nothing outside this directory |
+| `internal/drivefetch`, `internal/dvlibraries` | the Drive fetch mechanics and which libraries this install pulls |
+| `internal/queue`, `internal/drain` | the pending-write queue and the drain pass over it |
 | `systemd/` | six units: the display, the browser, VNC and noVNC, and the tab reaper with its timer |
 | `sudoers.d/` | two rules: the one wrapper a caller may spawn, and the re-ask |
+
+`icloud-mcp` with no subcommand serves stdio, which is what `stdio.sh` spawns; the units and wrappers name the same binary with its subcommand, so the one-binary property is reviewable in one `ls`.
 
 ## The session, and what a restart costs
 
@@ -30,17 +34,17 @@ What a restart costs is Apple's data-access grant, which is bound to the browser
 
 A fresh app-page load is refused between 23:00 and 07:00 local. An already-loaded tab is untouched, so reading notes and reminders through the night still works; only a load that would raise a prompt is deferred, with a message saying so.
 
-One latch decides whether the owner has already been asked, at `$ICLOUD_SHARED_STATE/blocked`. While it exists, the app helper refuses before touching the browser, nothing retries, and no watchdog restarts or re-requests, because retrying cannot produce a different answer until the owner approves. It is released by `agent-reask-access`, which is the owner saying they are at a device, or by `session_check` reporting `OK`. A re-ask navigates one app rather than two, because Apple's grant covers iCloud.com data rather than a single application.
+One latch decides whether the owner has already been asked, at `$ICLOUD_SHARED_STATE/blocked`. While it exists, the app helper refuses before touching the browser, nothing retries, and no watchdog restarts or re-requests, because retrying cannot produce a different answer until the owner approves. It is released by `agent-reask-access`, which is the owner saying they are at a device, or by `icloud-mcp session-check` reporting healthy. A re-ask navigates one app rather than two, because Apple's grant covers iCloud.com data rather than a single application.
 
 When the session itself has expired, that is a different failure with a different message and it is interactive: start `agent-vnc`, tunnel to it over loopback, sign in, and tick "Trust this browser", or Apple never issues `X-APPLE-WEBAUTH-TOKEN` and the session dies at the next restart. Re-grant data access when prompted, then stop `agent-vnc`; the unit has no `[Install]` section on purpose, so it never comes back at boot.
 
 ## The Drive pull
 
-`bin/icloud_drive_fetch.py` runs as the service account and stages files under `$DRIVE_STAGING`. It loads the Drive web app once to capture the query string the app appends to its own API calls, then talks to that API directly with the browser's cookies through Playwright's request context: `retrieveItemDetailsInFolders` on `drivews.icloud.com` lists a folder by id, `download/batch` on `docws.icloud.com` turns a file id into a signed URL, and a GET on that URL is the file. A `fetch` from the page's own JavaScript is refused by CORS, which is why the request context and not the page does the talking. Files whose `etag` is unchanged are skipped, and `$DRIVE_ETAGS` is what records that.
+`icloud-mcp drive-fetch` runs as the service account and stages files under `$DRIVE_STAGING`. It loads the Drive web app once to capture the query string the app appends to its own API calls, then talks to that API directly with the browser's cookies over plain HTTPS: `retrieveItemDetailsInFolders` on `drivews.icloud.com` lists a folder by id, `download/batch` on `docws.icloud.com` turns a file id into a signed URL, and a GET on that URL is the file. A `fetch` from the page's own JavaScript is refused by CORS, which is why a direct client carrying the cookies, and not the page, does the talking. Files whose `etag` is unchanged are skipped, and `$DRIVE_ETAGS` is what records that.
 
 Scheduling it is yours. Nothing in this repository runs it for you: point a systemd timer or a cron entry at it, once a day being a common choice, and `drive_status` will tell a client whether that schedule is actually keeping up.
 
-Which folders are pulled is configuration, not code: `DRIVE_LIBRARIES` is a JSON array of `{name, kind, dest}` entries. Use `folder` for any app export folder: every file beneath it is fetched and its relative layout is preserved under `dest`. `tree` is the narrower monthly-export layout, and `snapshot` is one file rewritten whole. An empty or unparseable value pulls nothing and says so rather than guessing at names. `icloud_lib/drive_libraries.py` documents the entry shape.
+Which folders are pulled is configuration, not code: `DRIVE_LIBRARIES` is a JSON array of `{name, kind, dest}` entries. Use `folder` for any app export folder: every file beneath it is fetched and its relative layout is preserved under `dest`. `tree` is the narrower monthly-export layout, and `snapshot` is one file rewritten whole. An empty or unparseable value pulls nothing and says so rather than guessing at names. `internal/dvlibraries` documents the entry shape.
 
 What happens to a staged file afterwards is outside this server. It fetches, it stages, and it reports; it never reads a staged file back and it never hands one on. If something else on the host imports what is staged, run that as a different account, so the account holding the browser session cannot reach whatever it feeds.
 
@@ -50,19 +54,19 @@ What happens to a staged file afterwards is outside this server. It fetches, it 
 
 **Restarting the browser is a decision, never a side effect.** The resident process is the session, and the next app-page load after a restart costs the owner an approval tap on a device. Reloading unit files, moving these files and re-running the wrapper are all free; restarting `agent-browser`, `agent-xvfb`, `agent-vnc` or `agent-novnc` is not.
 
-**Chromium must run headed.** Playwright's headless mode is a different binary reporting `HeadlessChrome`, and Apple binds the session to the user agent, so a headless relaunch reads as a different browser and the session dies server-side. Hence the permanent virtual display.
+**Chromium must run headed.** Headless mode reports a different user agent, and Apple binds the session to the user agent, so a headless relaunch reads as a different browser and the session dies server-side. Hence the permanent virtual display.
 
 **CalDAV's Reminders store is a dead one.** `caldav.icloud.com` serves a legacy store that Apple left behind when Reminders moved to the CloudKit format: writes there succeed, read back, and are invisible on every device and in Apple's own web UI. Reminders are browser-backed for that reason, and reminder tools must never be restored on CalDAV.
 
 **Recurring events need `expand=True`**, or CalDAV returns the master occurrence and a listing reports events in the wrong month. Writes read back rather than echoing the request, which is what makes a stored time a checked fact.
 
-**An ISO offset is not a timezone.** `datetime.fromisoformat` returns a fixed-offset tzinfo, and the calendar layer serialises that by taking the wall clock and calling it UTC, which shifts an event silently. Offset-carrying values are converted into the named zone so icalendar has a real TZID to write.
+**An ISO offset is not a timezone.** A parsed offset is a fixed shift, and the calendar layer would serialise that by taking the wall clock and calling it UTC, which shifts an event silently. Offset-carrying values are converted into the named zone so the event carries a real TZID to write.
 
-**IMAP flags arrive after the literal**, so reading them off the first fetch tuple marks every message unread. `unread` and `answered` each come from their own `UID SEARCH`.
+**IMAP flags arrive after the literal**, so reading them off the first fetch marks every message unread. `unread` and `answered` each come from their own `UID SEARCH`.
 
 **Server-side mail search is not substring search, and cannot see an encoded header.** A MIME-encoded subject cannot match a plain word, uids come back in no particular order, and a shorter query can return fewer results than a longer one that contains it. So `search_mail` unions a server-side pass with a local pass over recent messages with headers decoded, sorts newest first rather than slicing, and reports `matched` and `scanned_recent` so a caller can tell a slice from a whole answer. `SEARCH FROM` is unreliable on the domain part: search the local part or a subject word, and treat an empty search as weak evidence.
 
-**A mailbox that does not exist does not raise.** `imaplib.select` returns a tuple on a NO and leaves the connection in AUTH, so the next search fails with a message about state rather than about the name. `_select` checks the result and raises with the mailbox name and the mailboxes that do exist, and `list_mailboxes` exists so names never have to be guessed.
+**A mailbox that does not exist does not raise.** A select on a NO leaves the connection in AUTH, so the next search fails with a message about state rather than about the name. The select helper checks the result and raises with the mailbox name and the mailboxes that do exist, and `list_mailboxes` exists so names never have to be guessed.
 
 **Mail is the most hostile byte stream this server writes to disk.** Saved attachments are held to four limits, none sufficient alone: a type denylist that includes archives, because their contents are not inspected; a size cap; a basename reduced to a safe character set, so a traversing filename lands in the directory rather than above it; and an expiry swept on every call. A refusal comes back in `attachments_skipped` with its reason, because a statement that was not saved and a statement that had no attachment must not read the same.
 

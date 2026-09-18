@@ -1,4 +1,4 @@
-// Command icloud-drain runs the writes that were waiting for the owner's
+// Subcommand drain (icloud-mcp drain) runs the writes that were waiting for
 // approval, now that it has arrived.
 //
 // Prints one line per item on stdout for the watchdog to relay, and
@@ -80,9 +80,9 @@ func productionRunner(cfg *config.Config) drain.Runner {
 	}
 }
 
-func main() {
+func runDrain(args []string) int {
 	reportOnly := false
-	for _, arg := range os.Args[1:] {
+	for _, arg := range args {
 		if arg == "--report-only" {
 			reportOnly = true
 		}
@@ -91,12 +91,12 @@ func main() {
 	tzName, err := cfg.LocalTimezone()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "bad environment: %v\n", err)
-		os.Exit(1)
+		return 1
 	}
 	owner, err := time.LoadLocation(tzName)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "bad environment: unknown timezone %q\n", tzName)
-		os.Exit(1)
+		return 1
 	}
 	d := &drain.Drain{
 		Queue:     queue.New(filepath.Join(cfg.SharedState, "pending.jsonl")),
@@ -108,4 +108,5 @@ func main() {
 		ErrOut:    os.Stderr,
 	}
 	d.RunPass(context.Background(), reportOnly)
+	return 0
 }

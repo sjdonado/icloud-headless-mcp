@@ -20,9 +20,9 @@ Protocol-only libraries such as the well-known `pyicloud` speak to Apple's priva
 
 ## Requirements
 
-An always-on Linux machine with Python 3.11 or newer, and no screen needed. A small VPS is enough, and so is a Raspberry Pi: those are the setups this exists for.
+An always-on Linux machine, and no screen needed. A small VPS is enough, and so is a Raspberry Pi: those are the setups this exists for. No toolchain lives on the host: the install is one static binary plus a system Chromium.
 
-- 64-bit, and on an ARM board check that `playwright install chromium` produces a binary before going further. If it does not, install the distribution's own Chromium and pass its path to Playwright's launch call as the executable path.
+- 64-bit. On any board a distribution Chromium is fine; where it is not on `PATH`, point `CHROMIUM_BIN` at it.
 - A virtual X display, because Chromium must run headed. Apple binds the session to the user agent and the headless build reports a different one.
 - An Apple ID with an app-specific password, and a device you can approve prompts on during setup.
 - A private network between you and that machine, such as Tailscale or any other WireGuard-style network, before the first login. The first-time sign-in is done through a remote desktop onto a browser you are typing Apple credentials into, so it must never cross a public interface. See [`SECURITY.md`](SECURITY.md).
@@ -31,6 +31,14 @@ An always-on Linux machine with Python 3.11 or newer, and no screen needed. A sm
 The real cost is Chromium's memory, and it is worth measuring rather than quoting: start the resident browser, open the app tabs you actually use, and read the resident set size on your own box. Calendar, contacts and mail need no browser at all, so an install that skips Notes and Reminders is far cheaper than one that does not.
 
 ## Quick start
+
+As root on the host, install the latest release in one line:
+
+```
+curl -fsSL https://raw.githubusercontent.com/sjdonado/icloud-headless-mcp/main/install.sh | sh
+```
+
+That lays down the worked example this document describes (service account `agent-icloud`, `/opt/agent-icloud`, the browser stack) and enables it. A different account or prefix means the manual install below instead of this script.
 
 The full first-run sequence, including the two-factor login and Apple's Advanced Data Protection grant, is in [`docs/SETUP.md`](docs/SETUP.md). Follow it once, end to end; two of its steps need you to be holding an Apple device.
 
@@ -56,7 +64,7 @@ The full first-run sequence, including the two-factor login and Apple's Advanced
 
 There is no mail delete or move tool, no note edit or delete, and no tool that can trigger the Drive pull.
 
-**Asking is MCP elicitation, and it is the only gate here.** `ask_approval` in `app.py` is the whole mechanism: the question goes to the client over the protocol, the client renders it however it asks its user, and the tool executes only on an explicit approval. Nothing leaves this process by any other channel, so the server needs no messaging credential to ask a question, and anything the owner has to know about a completed write is in the tool result for the client to relay. A session that cannot ask, which is what a scheduled run looks like from in here, gets a refusal and no write. Keep the elicitation schema free of required fields, so a plain accept with an empty object validates, and keep the tool timeout above the client's elicitation timeout.
+**Asking is MCP elicitation, and it is the only gate here.** One approval gate in the server is the whole mechanism: the question goes to the client over the protocol, the client renders it however it asks its user, and the tool executes only on an explicit approval. Nothing leaves this process by any other channel, so the server needs no messaging credential to ask a question, and anything the owner has to know about a completed write is in the tool result for the client to relay. A session that cannot ask, which is what a scheduled run looks like from in here, gets a refusal and no write. Keep the elicitation schema free of required fields, so a plain accept with an empty object validates, and keep the tool timeout above the client's elicitation timeout.
 
 **The tiering lives in this code, not in the client's configuration.** It is this server that decides a delete asks while creating an event solo does not. The client only renders the question.
 
@@ -108,30 +116,37 @@ Three things the wrapper supplies and the env file does not, because they are ab
 
 ## Install from scratch
 
-This directory plus its `requirements.txt` is the whole install. The paths and the account name below are one worked example and are install-time choices; a different prefix means changing it here, in `stdio.sh`, in the systemd units and in the sudoers rules together.
+A release tarball plus a system Chromium is the whole install. The paths and the account name below are one worked example and are install-time choices; a different prefix means changing it here, in `stdio.sh`, in the systemd units and in the sudoers rules together. `install.sh` does exactly this block for the worked example, so follow it by hand only when you deviate from it.
 
 ```
-useradd -r -m -d /opt/agent-icloud -s /usr/sbin/nologin agent-icloud
+VERSION=v1.0.0  # the release tag you are installing
+ARCH=amd64  # or arm64 on a Pi
+TARBALL=icloud-headless-mcp-$VERSION-linux-$ARCH.tar.gz
+set -euo pipefail
+curl -fsSL -O https://github.com/sjdonado/icloud-headless-mcp/releases/download/$VERSION/$TARBALL
+curl -fsSL https://github.com/sjdonado/icloud-headless-mcp/releases/download/$VERSION/sha256sums.txt -o sha256sums.txt
+grep -F "$TARBALL" sha256sums.txt
+sha256sum -c --status --ignore-missing sha256sums.txt
+tar xzf $TARBALL
+SRC=icloud-headless-mcp-$VERSION-linux-$ARCH
+
+id agent-icloud >/dev/null 2>&1 || useradd -r -m -d /opt/agent-icloud -s /usr/sbin/nologin agent-icloud
 install -d -o agent-icloud -g agent-icloud -m 700 /opt/agent-icloud/bin
-install -o agent-icloud -g agent-icloud -m 750 -t /opt/agent-icloud/bin \
-  stdio.sh server.py app.py bin/*.py bin/icloud-login.sh
-install -o agent-icloud -g agent-icloud -m 640 requirements.txt /opt/agent-icloud/bin/
-install -d -o agent-icloud -g agent-icloud -m 750 /opt/agent-icloud/bin/tools \
-  /opt/agent-icloud/bin/icloud_lib
-install -o agent-icloud -g agent-icloud -m 640 -t /opt/agent-icloud/bin/tools tools/*.py
-install -o agent-icloud -g agent-icloud -m 640 -t /opt/agent-icloud/bin/icloud_lib icloud_lib/*.py
-install -o root -g root -m 700 bin/agent-reask-access /usr/local/bin/agent-reask-access
+install -o agent-icloud -g agent-icloud -m 755 -t /opt/agent-icloud/bin \
+  $SRC/bin/icloud-mcp $SRC/bin/stdio.sh \
+  $SRC/bin/agent-reask-access $SRC/bin/icloud-login.sh
+install -o root -g root -m 700 $SRC/bin/agent-reask-access /usr/local/bin/agent-reask-access
 
-su -s /bin/bash agent-icloud -c 'cd /opt/agent-icloud && python3 -m venv .venv \
-  && .venv/bin/pip install -r /opt/agent-icloud/bin/requirements.txt'
-install -d -o root -g root -m 755 /opt/playwright
-PLAYWRIGHT_BROWSERS_PATH=/opt/playwright /opt/agent-icloud/.venv/bin/playwright install chromium
+command -v chromium || command -v chromium-browser || command -v google-chrome || { apt-get update && apt-get install -y chromium; }
 
+install -m 600 $SRC/.env.example .env  # fill in the Apple ID, app-specific password, and AGENT_TZ
+install -d -m 755 /etc/agent
 install -o agent-icloud -g agent-icloud -m 400 .env /etc/agent/icloud.env
-install -o root -g root -m 440 sudoers.d/agent-icloud /etc/sudoers.d/agent-icloud
-install -o root -g root -m 440 sudoers.d/agent-browser-restart /etc/sudoers.d/agent-browser-restart
+rm -f .env  # the filled copy must not linger outside the service account's file
+install -o root -g root -m 440 $SRC/sudoers.d/agent-icloud /etc/sudoers.d/agent-icloud
+install -o root -g root -m 440 $SRC/sudoers.d/agent-browser-restart /etc/sudoers.d/agent-browser-restart
 visudo -c
-install -o root -g root -m 644 -t /etc/systemd/system systemd/*
+install -o root -g root -m 644 -t /etc/systemd/system $SRC/systemd/*
 systemctl daemon-reload
 systemctl enable --now agent-xvfb agent-browser agent-tab-reaper.timer
 ```
@@ -163,7 +178,7 @@ How that is written down is the runtime's business rather than this server's, an
 
 ## Dependencies
 
-`requirements.txt`: `caldav` and `vobject` for calendar and contacts, `mcp`, and `playwright` for the browser-backed modules, which attach to the resident Chromium over CDP rather than launching anything. Mail is `imaplib` and `smtplib` from the standard library.
+One static binary, `icloud-mcp`, holding the server and every helper as subcommands (`icloud-mcp help` lists them). Building it needs a Go toolchain; running it needs only a system Chromium beside it. Rollback is reinstalling the previous release: the same tarball steps with the older tag.
 
 ## Verification
 
@@ -171,10 +186,10 @@ Run it as the account it runs as, and without restarting the browser:
 
 ```
 sudo -u <caller> -H sudo -n -u agent-icloud /opt/agent-icloud/bin/stdio.sh </dev/null
-sudo -u agent-icloud -H /opt/agent-icloud/.venv/bin/python /opt/agent-icloud/bin/session_check.py
+sudo -u agent-icloud -H /opt/agent-icloud/bin/icloud-mcp session-check
 ```
 
-The first proves the sudo grant, the env file and the venv, from the uid that uses it: it should start and exit silently on EOF. The second reports whether the resident browser can actually reach iCloud data, and distinguishes the three answers that need different fixes: healthy, signed out, needs a device approval, or no browser to talk to.
+The first proves the sudo grant, the env file and the binary, from the uid that uses it: it should start and exit silently on EOF. The second reports whether the resident browser can actually reach iCloud data, and distinguishes the three answers that need different fixes: healthy, signed out, needs a device approval, or no browser to talk to.
 
 Then, with the account's environment, call the tools directly and expect all four surfaces to answer: `list_calendars`, `list_mail`, `reminder_lists`, `notes_folders`, `drive_status`. Between 23:00 and 07:00 local, `reminder_lists` refuses rather than raising a prompt on the owner's devices; that is the quiet-hours rule working, not a failure.
 
@@ -188,4 +203,4 @@ The service account, paths, systemd units, sudoers rules, and runtime wiring in 
 
 ## Contributing
 
-Read [`SECURITY.md`](SECURITY.md) before touching credentials or the session. From the repo root, run `python3 -m unittest discover -s tests -v` and `python3 -m py_compile app.py server.py tools/*.py icloud_lib/*.py bin/*.py`; both must pass. There is no configured linter or typecheck. Keep the MCP timeout above the elicitation timeout, re-test `list_mail` while a Notes call holds its lock after concurrency changes, and never widen the sudoers rules beyond one exact command with no variable argument.
+Read [`SECURITY.md`](SECURITY.md) before touching credentials or the session. From the repo root, run `go build ./...`, `go vet ./...` and `go test ./...`; all must pass. There is no configured linter or typecheck. Keep the MCP timeout above the elicitation timeout, re-test `list_mail` while a Notes call holds its lock after concurrency changes, and never widen the sudoers rules beyond one exact command with no variable argument.

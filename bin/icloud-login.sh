@@ -9,7 +9,7 @@ set -euo pipefail
 export DISPLAY=:99
 export PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
 
-pkill -f "icloud_session.py login" 2>/dev/null || true
+pkill -f "icloud-mcp login" 2>/dev/null || true
 pkill -f "x11vnc -display :99" 2>/dev/null || true
 # Xvfb is a systemd service now (agent-xvfb), never killed here
 sleep 1
@@ -19,7 +19,7 @@ x11vnc -display :99 -localhost -rfbauth "$HOME/.vncpass" -forever -noshm -quiet 
   >/tmp/x11vnc.log 2>&1 &
 sleep 1
 
-nohup /opt/agent-icloud/.venv/bin/python /opt/agent-icloud/bin/icloud_session.py login \
+nohup /opt/agent-icloud/bin/icloud-mcp login \
   >/tmp/icloud-login.log 2>&1 &
 sleep 12
 echo "VNC on 127.0.0.1:5900 (loopback, password required). Log: /tmp/icloud-login.log"
