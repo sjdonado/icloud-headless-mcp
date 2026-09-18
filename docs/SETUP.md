@@ -69,7 +69,7 @@ sudo install -o agent-icloud -g agent-icloud -m 400 .env /etc/agent/icloud.env
 
 Two values need thought before you type them.
 
-`ICLOUD_APP_PASSWORD` is an app-specific password from the Apple ID account page, not your primary Apple password. It authenticates CalDAV, CardDAV, IMAP and SMTP, and it is revocable on its own without touching anything else, which is what you want on the day something goes wrong.
+`ICLOUD_APP_PASSWORD` is an app-specific password, not your primary Apple password. It authenticates CalDAV, CardDAV, IMAP and SMTP, and it is revocable on its own without touching anything else, which is what you want on the day something goes wrong. Generate it at account.apple.com, signed in as the account this server speaks for, under Sign-In and Security → App-Specific Passwords: choose Generate (or `+`), give it a label naming this install so you recognise it later, and copy the `xxxx-xxxx-xxxx-xxxx` value it shows exactly once. It needs two-factor authentication on the account; without it Apple offers no app-specific passwords at all. Never put the primary password in this file.
 
 `AGENT_TZ` is required and has deliberately no default. Your host may well run UTC while you do not, and Apple's web pickers store what they are typed as the page's zone, so the tools convert before typing. A guessed zone moves a reminder by hours and nothing errors. Set an IANA name such as `Europe/Amsterdam`. If you travel, point `AGENT_TZ_FILE` at a file holding the zone: it wins over `AGENT_TZ` whenever it holds anything, so the zone can change without a restart and without touching this account's credentials.
 
