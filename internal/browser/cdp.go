@@ -12,18 +12,20 @@ import (
 )
 
 // innerTextExpr reads a frame the way a person would: the rendered text,
-// tolerating frames with no body.
-const innerTextExpr = `(() => { try { return (document.body && document.body.innerText) || ''; } catch (e) { return ''; } })()`
+// tolerating frames with no body. A bare function, not an invoked one:
+// evalInFrame applies it, and applying an already-invoked result throws.
+const innerTextExpr = `(() => { try { return (document.body && document.body.innerText) || ''; } catch (e) { return ''; } })`
 
 // wsConn is one CDP session over the browser websocket. Commands go out
-// with ascending ids; events (frames with a "method" key) are skipped while
-// waiting for the matching reply. Calls serialize on a mutex: without it
-// concurrent calls interleave sends and steal each other's replies.
-// Single-flight: callers still sequence their own flows.
+// with ascending ids; events skipped while awaiting a reply are queued
+// rather than dropped, so request sniffing sees traffic that fired during
+// another call. Calls serialize on a mutex: without it concurrent calls
+// interleave sends and steal each other's replies.
 type wsConn struct {
-	ws   *websocket.Conn
-	mu   sync.Mutex
-	next int64
+	ws      *websocket.Conn
+	mu      sync.Mutex
+	next    int64
+	pending []map[string]any
 }
 
 func dialWS(url string) (*wsConn, error) {
@@ -53,6 +55,20 @@ func (c *wsConn) recvTimeout(ms int) (map[string]any, bool) {
 }
 
 func (c *wsConn) call(sessionID, method string, params, result any) error {
+	return c.callTimeout(sessionID, method, params, result, 300*time.Second)
+}
+
+// callTimeoutError is a CDP round-trip that outlived its deadline. It
+// implements Timeout so the health check reports a timeout, not a blob.
+type callTimeoutError struct{ method string }
+
+func (e *callTimeoutError) Error() string {
+	return "CDP " + e.method + ": timed out waiting for a reply"
+}
+
+func (e *callTimeoutError) Timeout() bool { return true }
+
+func (c *wsConn) callTimeout(sessionID, method string, params, result any, timeout time.Duration) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	id := int(atomic.AddInt64(&c.next, 1))
@@ -67,13 +83,13 @@ func (c *wsConn) call(sessionID, method string, params, result any) error {
 		return err
 	}
 	// Bounded: a stalled browser must surface as a timeout, never hang a
-	// lock-holding tool call forever. 300s clears the slowest legitimate
-	// call (a first CloudKit sync pass) with margin.
-	deadline := time.Now().Add(300 * time.Second)
+	// lock-holding tool call forever. The default 300s clears the slowest
+	// legitimate call (a first CloudKit sync pass) with margin.
+	deadline := time.Now().Add(timeout)
 	for {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return fmt.Errorf("CDP %s: timed out waiting for a reply", method)
+			return &callTimeoutError{method: method}
 		}
 		_ = c.ws.SetReadDeadline(time.Now().Add(minDuration(remaining, 30*time.Second)))
 		var raw map[string]any
@@ -84,6 +100,12 @@ func (c *wsConn) call(sessionID, method string, params, result any) error {
 			return err
 		}
 		if _, isEvent := raw["method"]; isEvent {
+			// Queue, don't drop: request sniffing and crash watching
+			// read the stream between calls.
+			c.pending = append(c.pending, raw)
+			if len(c.pending) > 256 {
+				c.pending = c.pending[len(c.pending)-256:]
+			}
 			continue
 		}
 		gotID, _ := raw["id"].(float64)
@@ -113,6 +135,27 @@ func minDuration(a, b time.Duration) time.Duration {
 
 type timeoutError interface{ Timeout() bool }
 
+// nextEvent returns the next stream event, queued or live. Responses to
+// other calls never appear here: call() consumes its own reply inline.
+func (c *wsConn) nextEvent(timeoutMS int) (map[string]any, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.pending) > 0 {
+		msg := c.pending[0]
+		c.pending = c.pending[1:]
+		return msg, true
+	}
+	_ = c.ws.SetReadDeadline(time.Now().Add(time.Duration(timeoutMS) * time.Millisecond))
+	var raw map[string]any
+	if err := websocket.JSON.Receive(c.ws, &raw); err != nil {
+		return nil, false
+	}
+	if _, isEvent := raw["method"]; !isEvent {
+		return nil, false
+	}
+	return raw, true
+}
+
 func isTimeout(err error) bool {
 	var te timeoutError
 	return err != nil && errors.As(err, &te) && te.Timeout()
@@ -131,9 +174,22 @@ func (c *wsConn) cookies() ([]map[string]any, error) {
 }
 
 type frameNode struct {
-	ID       string      `json:"id"`
-	URL      string      `json:"url"`
-	Children []frameNode `json:"childFrames"`
+	ID  string `json:"id"`
+	URL string `json:"url"`
+}
+
+// frameTree mirrors Page.getFrameTree: children nest as
+// {frame: {...}, childFrames: [...]}, not as bare frames.
+type frameTree struct {
+	Frame    frameNode   `json:"frame"`
+	Children []frameTree `json:"childFrames"`
+}
+
+func collectFrames(tree frameTree, out *[]frameNode) {
+	*out = append(*out, tree.Frame)
+	for _, child := range tree.Children {
+		collectFrames(child, out)
+	}
 }
 
 // frameTexts evaluates innerText in the tab's own frame tree, one isolated

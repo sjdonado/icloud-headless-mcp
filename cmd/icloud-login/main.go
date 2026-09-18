@@ -25,6 +25,7 @@ func main() {
 func run() int {
 	cfg := config.LoadEnv()
 	state := browser.State{Dir: cfg.StateDir, Shared: cfg.SharedState, CDP: cfg.CDP}
+	cdpPort := cfg.CDPPort()
 	bin, err := chromiumBinary()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -39,7 +40,7 @@ func run() int {
 		"--disable-sync",
 		"--disable-translate",
 		"--no-first-run",
-		"--remote-debugging-port=9222",
+		fmt.Sprintf("--remote-debugging-port=%d", cdpPort),
 		"--remote-debugging-address=127.0.0.1",
 		"--user-data-dir=" + profile,
 		"--window-size=1280,900",

@@ -19,16 +19,21 @@ import (
 type fakeCDP struct {
 	t *testing.T
 
-	mu      sync.Mutex
-	cookies []map[string]any
-	texts   map[string]string
-	targets []Target
-	closed  []string
+	mu         sync.Mutex
+	cookies    []map[string]any
+	texts      map[string]string
+	targets    []Target
+	closed     []string
+	hits       map[string]int
+	created    []string
+	frameURLs  map[string]string
+	evalArrays map[string][]any
 }
 
 func newFakeCDP(t *testing.T) (*fakeCDP, *httptest.Server, *CDP) {
 	t.Helper()
-	f := &fakeCDP{t: t, texts: map[string]string{}}
+	f := &fakeCDP{t: t, texts: map[string]string{}, hits: map[string]int{},
+		frameURLs: map[string]string{}, evalArrays: map[string][]any{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/json/version", func(w http.ResponseWriter, r *http.Request) {
 		wsURL := "ws://" + r.Host + "/ws"
@@ -70,6 +75,7 @@ func (f *fakeCDP) serveWS(ws *websocket.Conn) {
 		id, _ := msg["id"].(float64)
 		params, _ := msg["params"].(map[string]any)
 		f.mu.Lock()
+		f.hits[method]++
 		switch method {
 		case "Storage.getCookies":
 			cookies := f.cookies
@@ -84,21 +90,37 @@ func (f *fakeCDP) serveWS(ws *websocket.Conn) {
 			}
 			f.mu.Unlock()
 			f.reply(ws, id, map[string]any{"sessionId": "S1"})
-		case "Page.getFrameTree":
+		case "Target.createTarget":
+			u, _ := params["url"].(string)
+			f.created = append(f.created, u)
 			f.mu.Unlock()
-			f.reply(ws, id, map[string]any{"frameTree": map[string]any{
-				"frame": map[string]any{"id": "F1"},
-			}})
+			f.reply(ws, id, map[string]any{"targetId": "t-new"})
+		case "Page.navigate", "Target.detachFromTarget",
+			"Browser.grantPermissions", "Emulation.setTimezoneOverride", "Network.enable":
+			f.mu.Unlock()
+			f.reply(ws, id, map[string]any{})
 		case "Page.createIsolatedWorld":
 			f.mu.Unlock()
 			f.reply(ws, id, map[string]any{"executionContextId": 7})
+		case "Page.getFrameTree":
+			f.mu.Unlock()
+			f.reply(ws, id, map[string]any{"frameTree": map[string]any{
+				"frame": map[string]any{"id": "F1", "url": f.frameURLs[attached]},
+			}})
 		case "Runtime.evaluate":
-			text := f.texts[attached]
+			arrs := f.evalArrays[attached]
+			n := f.hits[method]
+			var value any
+			if len(arrs) > 0 {
+				if n > len(arrs) {
+					n = len(arrs)
+				}
+				value = arrs[n-1]
+			} else {
+				value = f.texts[attached]
+			}
 			f.mu.Unlock()
-			f.reply(ws, id, map[string]any{"result": map[string]any{"value": text}})
-		case "Target.detachFromTarget":
-			f.mu.Unlock()
-			f.reply(ws, id, map[string]any{})
+			f.reply(ws, id, map[string]any{"result": map[string]any{"value": value}})
 		default:
 			f.mu.Unlock()
 			_ = websocket.JSON.Send(ws, map[string]any{
@@ -257,5 +279,117 @@ func TestBlockedLatch(t *testing.T) {
 	}
 	if !state.Blocked() {
 		t.Fatal("latch file must read blocked")
+	}
+}
+
+func testNotesApp() App {
+	return App{Name: "notes", URL: "https://www.icloud.com/notes/", FrameHint: "notes3", ReadyClass: "note-list-item-container"}
+}
+
+func amsterdam(t *testing.T) *time.Location {
+	t.Helper()
+	loc, err := time.LoadLocation("Europe/Amsterdam")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return loc
+}
+
+func TestAppOpenWarmTab(t *testing.T) {
+	fake, srv, cdp := newFakeCDP(t)
+	fake.cookies = []map[string]any{{"name": "X-APPLE-WEBAUTH-TOKEN"}}
+	fake.targets = []Target{{ID: "t-notes", Type: "page", URL: "https://www.icloud.com/notes/"}}
+	fake.frameURLs["t-notes"] = "https://www.icloud.com/notes/notes3.html"
+	fake.evalArrays["t-notes"] = []any{[]any{"L1"}}
+	state := testState(t)
+	state.CDP = srv.URL
+	_ = cdp
+	loc := amsterdam(t)
+	noon := time.Date(2026, 3, 10, 12, 0, 0, 0, loc)
+	tab, err := testNotesApp().Open(state, loc, noon)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tab.Close()
+	if got := state.LastUsed("notes"); got.IsZero() {
+		t.Fatal("warm tab did not touch the stamp")
+	}
+	if fake.hits["Page.navigate"] != 0 {
+		t.Fatal("warm tab must not navigate")
+	}
+}
+
+func TestAppOpenLatched(t *testing.T) {
+	fake, srv, _ := newFakeCDP(t)
+	fake.cookies = []map[string]any{{"name": "X-APPLE-WEBAUTH-TOKEN"}}
+	state := testState(t)
+	state.CDP = srv.URL
+	if err := os.WriteFile(state.Latch(), []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := testNotesApp().Open(state, amsterdam(t), time.Now())
+	if _, ok := err.(*NeedsApprovalError); !ok {
+		t.Fatalf("err = %v, want NeedsApproval", err)
+	}
+	if fake.hits["Target.createTarget"] != 0 {
+		t.Fatal("latched open must not touch tabs")
+	}
+}
+
+func TestAppOpenSignedOut(t *testing.T) {
+	fake, srv, _ := newFakeCDP(t)
+	fake.cookies = []map[string]any{{"name": "other"}}
+	state := testState(t)
+	state.CDP = srv.URL
+	_, err := testNotesApp().Open(state, amsterdam(t), time.Now())
+	if _, ok := err.(*SignedOutError); !ok {
+		t.Fatalf("err = %v, want SignedOut", err)
+	}
+}
+
+func TestAppOpenQuietRefusal(t *testing.T) {
+	fake, srv, _ := newFakeCDP(t)
+	fake.cookies = []map[string]any{{"name": "X-APPLE-WEBAUTH-TOKEN"}}
+	fake.targets = []Target{}
+	state := testState(t)
+	state.CDP = srv.URL
+	loc := amsterdam(t)
+	night := time.Date(2026, 3, 10, 3, 0, 0, 0, loc)
+	_, err := testNotesApp().Open(state, loc, night)
+	need, ok := err.(*NeedsApprovalError)
+	if !ok {
+		t.Fatalf("err = %v, want NeedsApproval", err)
+	}
+	if !strings.Contains(need.Msg, "middle of the night") {
+		t.Fatalf("msg = %q", need.Msg)
+	}
+	if len(fake.created) != 1 {
+		t.Fatalf("created = %v, want the fresh tab", fake.created)
+	}
+	if len(fake.closed) != 1 || fake.closed[0] != "t-new" {
+		t.Fatalf("closed = %v, want the fresh tab closed", fake.closed)
+	}
+	if fake.hits["Page.navigate"] != 0 {
+		t.Fatal("quiet refusal must not navigate")
+	}
+}
+
+func TestAppOpenSettlesGrowingList(t *testing.T) {
+	fake, srv, _ := newFakeCDP(t)
+	fake.cookies = []map[string]any{{"name": "X-APPLE-WEBAUTH-TOKEN"}}
+	fake.targets = []Target{}
+	state := testState(t)
+	state.CDP = srv.URL
+	fake.frameURLs["t-new"] = "https://www.icloud.com/notes/notes3.html"
+	fake.evalArrays["t-new"] = []any{[]any{"a"}, []any{"a", "b"}, []any{"a", "b"}}
+	loc := amsterdam(t)
+	noon := time.Date(2026, 3, 10, 12, 0, 0, 0, loc)
+	tab, err := testNotesApp().Open(state, loc, noon)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	tab.Close()
+	if n := fake.hits["Runtime.evaluate"]; n < 3 {
+		t.Fatalf("settle loop evaluated %d times, want >= 3", n)
 	}
 }

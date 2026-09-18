@@ -10,8 +10,7 @@ import "fmt"
 // snippet holds a %s. snippetTests in reminders_test.go guards the
 // interpolation: a stray % anywhere else in a snippet would corrupt it.
 
-const rowsJS = `() => {
-  const walk = (root, depth, fn) => {
+const rowsJS = `() => {  const walk = (root, depth, fn) => {
     if (depth > 16) return;
     for (const el of root.querySelectorAll('*')) {
       if (el.shadowRoot) walk(el.shadowRoot, depth + 1, fn);
@@ -335,8 +334,7 @@ const timeSegmentsJS = `() => {
   return JSON.stringify(out);
 }`
 
-const completeGeoJS = `(title) => {
-  ` + "%s" + `
+const completeGeoJS = `(title) => {  ` + "%s" + `
   const want = title.toLowerCase();
   const hits = [];
   walk(document, 0, (el) => {
@@ -370,6 +368,20 @@ const completeGeoJS = `(title) => {
                          x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2)});
 }`
 
+// selectedListJS reads which list the app considers selected, from the
+// selection marker rather than from the rows on screen.
+const selectedListJS = `() => {
+  ` + "%s" + `
+  let selected = '';
+  walk(document, 0, (el) => {
+    if (selected) return;
+    if (el.getAttribute && el.getAttribute('aria-selected') === 'true') {
+      selected = (el.getAttribute('aria-label') || el.innerText || '').trim();
+    }
+  });
+  return selected;
+}`
+
 // Interpolated snippets: each %s above takes the shared walker.
 var (
 	rowGeo       = fmt.Sprintf(rowGeoJS, walkPrelude)
@@ -387,4 +399,5 @@ var (
 	segment      = fmt.Sprintf(segmentJS, walkPrelude)
 	timeSegments = fmt.Sprintf(timeSegmentsJS, walkPrelude)
 	completeGeo  = fmt.Sprintf(completeGeoJS, walkPrelude)
+	selectedList = fmt.Sprintf(selectedListJS, walkPrelude)
 )

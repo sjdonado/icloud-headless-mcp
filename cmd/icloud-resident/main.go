@@ -21,8 +21,6 @@ import (
 	"github.com/sjdonado/icloud-headless-mcp/internal/config"
 )
 
-const cdpPort = 9222
-
 func chromiumBinary() (string, error) {
 	if bin := os.Getenv("CHROMIUM_BIN"); bin != "" {
 		return bin, nil
@@ -53,6 +51,7 @@ func run() int {
 	}
 	profile := filepath.Join(cfg.StateDir, "profile")
 	logFile := filepath.Join(cfg.StateDir, "chrome.log")
+	cdpPort := cfg.CDPPort()
 	args := []string{
 		"--enable-logging", "--log-file=" + logFile, "--log-level=1",
 		"--disable-dev-shm-usage",

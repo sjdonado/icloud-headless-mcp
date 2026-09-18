@@ -341,6 +341,16 @@ func (c *Client) List(ctx context.Context, folder *string, limit int) (map[strin
 	})
 }
 
+// normFolder treats an explicitly empty folder as omitted: opening the
+// folder named "" would substring-match the first folder instead of the
+// unfiltered list.
+func normFolder(folder *string) *string {
+	if folder != nil && *folder == "" {
+		return nil
+	}
+	return folder
+}
+
 func orFolder(folder *string) string {
 	if folder == nil {
 		return "All iCloud"
@@ -467,8 +477,11 @@ func (c *Client) openVerified(tab *browser.Tab, title string, folder *string, ma
 			head = strings.ToLower(strings.Join(strings.Fields(bodyLines[0]), " "))
 		}
 		titleOK = sameTitle(wanted.Title, firstLine)
-		overlap := min(len(head), len(wantSnip))
-		snipOK = wantSnip == "" || (overlap > 0 && head[:overlap] == wantSnip[:overlap])
+		// Prefix comparison in either direction, on valid UTF-8 where a
+		// byte-prefix is a rune-prefix. An empty head never matches a
+		// snippet: there is nothing to compare it against.
+		snipOK = wantSnip == "" || (head != "" &&
+			(strings.HasPrefix(head, wantSnip) || strings.HasPrefix(wantSnip, head)))
 		if titleOK && snipOK {
 			return &verifiedNote{row: wanted, text: text}, nil
 		}
@@ -698,6 +711,9 @@ func (c *Client) Create(ctx context.Context, title, body string, folder *string)
 			// Body only: the title was already typed above, and pasting
 			// it again would duplicate it. (Replace keeps its h1 because
 			// select-all takes the title too.)
+			if err := tab.GrantClipboard(); err != nil {
+				return nil, err
+			}
 			html := MarkdownToHTML(body)
 			_ = tab.Key("Enter", 0)
 			sleep(500)
@@ -880,6 +896,7 @@ func Handlers(cfg *config.Config, ask func(ctx context.Context, question string)
 			if err != nil {
 				return mcpserver.ErrorResult(err.Error())
 			}
+			folder = normFolder(folder)
 			return runClient(cfg, ask, func(c *Client) (map[string]any, error) {
 				return c.List(ctx, folder, limit)
 			})
@@ -900,6 +917,7 @@ func Handlers(cfg *config.Config, ask func(ctx context.Context, question string)
 			if err != nil {
 				return mcpserver.ErrorResult(err.Error())
 			}
+			folder = normFolder(folder)
 			return runClient(cfg, ask, func(c *Client) (map[string]any, error) {
 				return c.Read(ctx, title, folder, match)
 			})
@@ -941,6 +959,7 @@ func Handlers(cfg *config.Config, ask func(ctx context.Context, question string)
 			if err != nil {
 				return mcpserver.ErrorResult(err.Error())
 			}
+			folder = normFolder(folder)
 			return runClient(cfg, ask, func(c *Client) (map[string]any, error) {
 				return c.Update(ctx, title, body, folder, match)
 			})
@@ -959,6 +978,7 @@ func Handlers(cfg *config.Config, ask func(ctx context.Context, question string)
 			if err != nil {
 				return mcpserver.ErrorResult(err.Error())
 			}
+			folder = normFolder(folder)
 			return runClient(cfg, ask, func(c *Client) (map[string]any, error) {
 				out, err := c.Create(ctx, title, body, folder)
 				if err != nil {

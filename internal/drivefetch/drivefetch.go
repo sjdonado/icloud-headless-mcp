@@ -93,7 +93,11 @@ func (a *API) Items(drivewsid string) ([]map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	list, _ := out.([]any)
+	list, ok := out.([]any)
+	if !ok {
+		raw, _ := json.Marshal(out)
+		return nil, fmt.Errorf("unexpected drive response envelope: %s", truncate(string(raw), 200))
+	}
 	if len(list) == 0 {
 		return nil, nil
 	}
@@ -150,9 +154,8 @@ func (a *API) Download(item map[string]any) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if a.Cookies != "" {
-		req.Header.Set("Cookie", a.Cookies)
-	}
+	// No cookies here: the signed URL already authorises the download, and
+	// the content host gets no session it does not need.
 	resp, err := a.Client.Do(req)
 	if err != nil {
 		return nil, err
@@ -185,8 +188,17 @@ func SplitRequest(rawurl string) (service, base, query string, ok bool) {
 }
 
 // Stage writes data under the staging root at rel, atomically: partial
-// files never look complete.
+// files never look complete. rel must stay inside the root: names arrive
+// from Drive listings, which are not trusted input.
 func Stage(staging, rel string, data []byte) (string, error) {
+	if filepath.IsAbs(rel) {
+		return "", fmt.Errorf("unsafe staging path: %q", rel)
+	}
+	for _, piece := range strings.Split(filepath.ToSlash(rel), "/") {
+		if piece == ".." {
+			return "", fmt.Errorf("unsafe staging path: %q", rel)
+		}
+	}
 	target := filepath.Join(staging, rel)
 	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 		return "", err

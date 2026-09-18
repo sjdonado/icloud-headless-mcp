@@ -1258,6 +1258,9 @@ func (c *Client) openItems(tab *browser.Tab) (map[string]map[string]any, error) 
 // is verified in the field before committing, and the row is read back
 // from the list afterwards; a write that lands nowhere is never claimed.
 func (c *Client) Create(ctx context.Context, title, listName, due string) (map[string]any, error) {
+	if strings.TrimSpace(title) == "" {
+		return map[string]any{"error": "a reminder needs a title"}, nil
+	}
 	var when time.Time
 	var at *dueTime
 	if strings.TrimSpace(due) != "" {

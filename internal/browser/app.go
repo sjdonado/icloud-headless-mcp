@@ -321,7 +321,7 @@ func (app App) Open(state State, owner *time.Location, now time.Time) (*Tab, err
 		}
 	}
 
-	deadline := now.Add(90 * time.Second)
+	deadline := time.Now().Add(90 * time.Second)
 	for time.Now().Before(deadline) {
 		frames, ferr := conn.frameIDs(session, tab.ID)
 		if ferr != nil {
@@ -506,7 +506,7 @@ func OpenDriveTab(cdp *CDP, ownerZone, driveURL string, timeoutMS int, enoughURL
 	seen := map[string]bool{}
 	deadline := nowMS() + int64(timeoutMS)
 	for nowMS() < deadline {
-		msg, ok := conn.recvTimeout(2000)
+		msg, ok := conn.nextEvent(2000)
 		if !ok {
 			continue
 		}
@@ -544,7 +544,7 @@ func CrashVictims(cdp *CDP, waitMS int) []string {
 	var out []string
 	deadline := nowMS() + int64(waitMS)
 	for nowMS() < deadline {
-		msg, ok := conn.recvTimeout(500)
+		msg, ok := conn.nextEvent(500)
 		if !ok {
 			continue
 		}

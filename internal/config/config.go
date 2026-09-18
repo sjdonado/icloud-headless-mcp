@@ -7,8 +7,10 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -84,7 +86,17 @@ func LoadEnv() *Config {
 	return c
 }
 
-// LocalTimezone is the owner's current zone: whatever the TZ file holds,
+// CDPPort takes the DevTools port from the configured CDP URL so a
+// served port and a polled port cannot disagree. Defaults to 9222.
+func (c *Config) CDPPort() int {
+	if u, err := url.Parse(c.CDP); err == nil {
+		if port, err := strconv.Atoi(u.Port()); err == nil && port > 0 {
+			return port
+		}
+	}
+	return 9222
+}
+
 // else AGENT_TZ. Neither existing raises rather than guessing, mirroring
 // icloud_tabs.local_timezone: a zone guessed here types the wrong hour into
 // an Apple picker and nothing errors.

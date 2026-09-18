@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // This file extends the raw CDP session with driving primitives: frames,
@@ -96,23 +97,14 @@ const AlertJS = `() => {
 // FrameIDs lists every frame id under the tab, via the frame tree.
 func (c *wsConn) frameIDs(session, targetID string) ([]frameNode, error) {
 	var tree struct {
-		FrameTree struct {
-			Frame frameNode `json:"frame"`
-		} `json:"frameTree"`
+		FrameTree frameTree `json:"frameTree"`
 	}
 	_ = targetID
 	if err := c.call(session, "Page.getFrameTree", map[string]any{}, &tree); err != nil {
 		return nil, err
 	}
 	var out []frameNode
-	var walk func(f frameNode)
-	walk = func(f frameNode) {
-		out = append(out, f)
-		for _, child := range f.Children {
-			walk(child)
-		}
-	}
-	walk(tree.FrameTree.Frame)
+	collectFrames(tree.FrameTree, &out)
 	return out, nil
 }
 
@@ -140,11 +132,15 @@ func (c *wsConn) isolatedWorld(session, targetID, hint, expr string, arg any) (j
 }
 
 func (c *wsConn) evalInFrame(session, frameID, expr string, arg any) (json.RawMessage, error) {
+	return c.evalInFrameTimeout(session, frameID, expr, arg, 300*time.Second)
+}
+
+func (c *wsConn) evalInFrameTimeout(session, frameID, expr string, arg any, timeout time.Duration) (json.RawMessage, error) {
 	var world struct {
 		ExecutionContextID int `json:"executionContextId"`
 	}
-	if err := c.call(session, "Page.createIsolatedWorld",
-		map[string]any{"frameId": frameID, "worldName": "icloud-agent"}, &world); err != nil {
+	if err := c.callTimeout(session, "Page.createIsolatedWorld",
+		map[string]any{"frameId": frameID, "worldName": "icloud-agent"}, &world, timeout); err != nil {
 		return nil, err
 	}
 	args := []any{}
@@ -164,12 +160,12 @@ func (c *wsConn) evalInFrame(session, frameID, expr string, arg any) (json.RawMe
 			Text string `json:"text"`
 		} `json:"exceptionDetails,omitempty"`
 	}
-	if err := c.call(session, "Runtime.evaluate", map[string]any{
+	if err := c.callTimeout(session, "Runtime.evaluate", map[string]any{
 		"expression":    wrapped,
 		"contextId":     world.ExecutionContextID,
 		"returnByValue": true,
 		"awaitPromise":  true,
-	}, &eval); err != nil {
+	}, &eval, timeout); err != nil {
 		return nil, err
 	}
 	if eval.Exception != nil {
@@ -289,7 +285,13 @@ func (c *wsConn) keyPress(session, key string, delayMS int) error {
 	case "ArrowRight":
 		code, windowsCode = "ArrowRight", 39
 	default:
-		code, text = key, key
+		upper := strings.ToUpper(key)
+		if len(upper) == 1 && upper[0] >= 'A' && upper[0] <= 'Z' {
+			code = "Key" + upper
+			windowsCode = 65 + int(upper[0]-'A')
+		} else {
+			code, text = key, key
+		}
 	}
 	for _, typ := range []string{"keyDown", "keyUp"} {
 		params := map[string]any{"type": typ, "key": key, "code": code}
@@ -350,14 +352,14 @@ func (c *wsConn) listenEvents(durMS int, match func(method string, params map[st
 		if remaining <= 0 {
 			return out
 		}
-		msg, ok := c.recvTimeout(int(remaining))
-		if !ok {
-			return out
+		if remaining > 2000 {
+			remaining = 2000
 		}
-		method, _ := msg["method"].(string)
-		if method == "" {
+		msg, ok := c.nextEvent(int(remaining))
+		if !ok {
 			continue
 		}
+		method, _ := msg["method"].(string)
 		params, _ := msg["params"].(map[string]any)
 		if match(method, params) {
 			out = append(out, params)

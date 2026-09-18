@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // Blocked markers: the phrases Apple's grant-lapsed pages show. Worded
@@ -51,7 +52,13 @@ func (c *CDP) TokenPresent() (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return hasToken(cookies), nil
+	return HasSessionToken(cookies), nil
+}
+
+// HasSessionToken reports whether the cookie set carries the persistent
+// session token.
+func HasSessionToken(cookies []map[string]any) bool {
+	return hasToken(cookies)
 }
 
 // AllCookies returns the browser's cookies.
@@ -116,6 +123,8 @@ func LoadJar(state State) []map[string]any {
 
 // Ping proves the browser process answers: a call that has to reach it,
 // because tab lists and cookie reads have both lied about a dead browser.
+// Bounded short: this runs every 5 seconds in the resident loop, so a
+// wedged tab must read as one missed beat, not a minutes-long stall.
 func (c *CDP) Ping() error {
 	wsURL, err := c.DebuggerURL()
 	if err != nil {
@@ -134,15 +143,21 @@ func (c *CDP) Ping() error {
 		if tg.Type != "page" {
 			continue
 		}
-		session, err := conn.tabAttach(tg.ID)
-		if err != nil {
-			continue
+		if err := conn.pingTab(tg.ID); err == nil {
+			return nil
 		}
-		_, err = conn.isolatedWorld(session, tg.ID, "", `() => 1`, nil)
-		conn.tabDetach(session)
+	}
+	return fmt.Errorf("no live page answered")
+}
+
+func (c *wsConn) pingTab(targetID string) error {
+	session, err := c.tabAttach(targetID)
+	if err != nil {
 		return err
 	}
-	return fmt.Errorf("no pages left")
+	defer c.tabDetach(session)
+	_, err = c.evalInFrameTimeout(session, "", `() => 1`, nil, 15*time.Second)
+	return err
 }
 
 // Outcome is the session verdict. The four answers need four different

@@ -67,7 +67,12 @@ func run() int {
 	}
 	defer unlock()
 	cdp := browser.NewCDP(cfg.CDP)
-	if ok, err := cdp.TokenPresent(); err != nil || !ok {
+	cookies, err := cdp.AllCookies()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "cannot reach the browser; nothing fetched")
+		return 2
+	}
+	if !browser.HasSessionToken(cookies) {
 		fmt.Fprintln(os.Stderr, "the iCloud browser session has expired; nothing fetched")
 		return 2
 	}
@@ -111,7 +116,7 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "drive did not start talking to its API within 90s")
 		return 1
 	}
-	cookies, err := cdp.AllCookies()
+	cookies, err = cdp.AllCookies()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "could not read browser cookies: %v\n", err)
 		return 1

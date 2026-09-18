@@ -569,6 +569,9 @@ func collectParts(raw []byte) (body, html string, attachments []mailPart, isMult
 	if err != nil && !message.IsUnknownCharset(err) {
 		return "", "", nil, false, err
 	}
+	if mr == nil {
+		return "", "", nil, false, nil
+	}
 	for {
 		part, err := mr.NextPart()
 		if err == io.EOF {
