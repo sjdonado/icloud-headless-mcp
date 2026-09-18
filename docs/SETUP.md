@@ -6,13 +6,15 @@ Read it once before starting. Two steps in the middle need you to be holding an 
 
 The systemd units in `systemd/` are the worked example throughout. They are the units from a real deployment, with the paths and the account name that deployment used. Nothing forces you to use those names: they are install-time choices, and if you change them you change them in the units, in the wrapper and in the sudoers rules together.
 
+Fast path: `install.sh` from the README performs sections 1 through 5 for the worked example. What follows is the same sequence by hand, for when you deviate from it.
+
 ## Minimum requirements, plainly
 
-A Linux machine that is always on, with a Python 3.11 or newer, that you can reach over SSH. A small VPS is enough. A Raspberry Pi is enough. Neither needs a screen.
+A Linux machine that is always on, that you can reach over SSH. A small VPS is enough. A Raspberry Pi is enough. Neither needs a screen. Nothing is built on the host: the install is one static binary plus a system Chromium.
 
-64-bit. Playwright's Chromium download does not cover every architecture, so on an ARM board check that `playwright install chromium` actually produces a binary before you go further, and fall back to the distribution's own Chromium, passing its path to Playwright's launch call as the executable path, if it does not.
+64-bit. Any distribution Chromium works; where it is not on `PATH`, set `CHROMIUM_BIN` to its path.
 
-Disk is modest: the code is small, the Python environment and a Chromium build are the bulk of it, and the browser profile grows slowly. Leave room for the staging directory if you use the Drive pull.
+Disk is modest: the code is small, a Chromium build is the bulk of it, and the browser profile grows slowly. Leave room for the staging directory if you use the Drive pull.
 
 The real cost is Chromium's memory, and it is the only requirement worth measuring rather than quoting. One headed Chromium holding an iCloud session, plus an app tab or two, is the whole footprint of this system. Measure it on your own box: start the resident, open the tabs you actually use, and read the resident set size of the browser process tree. Give the machine swap before you decide it is too small, and if you are tight on memory, let the tab reaper close idle tabs aggressively, because a warm tab is a convenience and not a requirement.
 
@@ -32,10 +34,10 @@ The shipped noVNC unit requires `tailscaled.service` and is reachable only over 
 
 ```
 sudo apt update
-sudo apt install python3 python3-venv xvfb x11vnc novnc websockify
+sudo apt install xvfb x11vnc novnc websockify chromium
 ```
 
-`xvfb` is the virtual display, because Chromium must run headed: Apple binds the session to the user agent and the headless build reports a different one, so a headless relaunch reads as a different browser and the session dies server-side. `x11vnc` and `novnc` exist only so a human can complete Apple's prompts once.
+`xvfb` is the virtual display, because Chromium must run headed: Apple binds the session to the user agent and the headless build reports a different one, so a headless relaunch reads as a different browser and the session dies server-side. `x11vnc` and `novnc` exist only so a human can complete Apple's prompts once. `chromium` is the headed browser the resident launches; where your distribution names it differently, install that package instead and set `CHROMIUM_BIN` if it lands outside `PATH`.
 
 ## 2. A service account of its own
 
@@ -47,23 +49,19 @@ sudo install -d -o agent-icloud -g agent-icloud -m 700 /opt/agent-icloud/bin
 ```
 The account name and the path above are a worked example, and they are the ones the shipped systemd units, `stdio.sh` and the sudoers rules already carry. Change them if you like, but change them in all four places together, or the units will start a server that is not there.
 
-Copy this directory's code into that `bin` directory, keeping `tools/` and `icloud_lib/` as subdirectories, owned by the service account and not writable by anybody else. The install block in the `README.md` (`Install from scratch`) is one worked example of exactly that.
+Unpack a release tarball into that `bin` directory: one `icloud-mcp` binary holding the server and every helper as subcommands, plus the `stdio.sh` wrapper and the login and re-ask helpers. Everything the account runs is that one binary, owned by the service account and not writable by anybody else. The install block in the `README.md` (`Install from scratch`) is one worked example of exactly that.
 
-## 3. The virtual environment and Chromium
+## 3. Chromium
 
-```
-sudo -u agent-icloud -H bash -c 'cd /opt/agent-icloud && python3 -m venv .venv && .venv/bin/pip install -r bin/requirements.txt'
-sudo install -d -o root -g root -m 755 /opt/playwright
-sudo PLAYWRIGHT_BROWSERS_PATH=/opt/playwright /opt/agent-icloud/.venv/bin/playwright install chromium
-```
-
-A shared root-owned browser root rather than a per-account copy, so the service account cannot modify the binary it runs.
+Step 1 already installed it. Confirm the resident will find it: a `chromium`, `chromium-browser` or `google-chrome` on `PATH` is enough, otherwise export `CHROMIUM_BIN` with its path in the units that launch a browser. Prefer a root-owned browser binary the service account cannot modify over a per-account copy.
 
 ## 4. The environment file
 
-Copy `.env.example`, fill it in, and install it readable only by the service account:
+Copy `.env.example` to `.env`, fill it in, and install it readable only by the service account:
 
 ```
+cp .env.example .env  # then edit it
+sudo install -d -m 755 /etc/agent
 sudo install -o agent-icloud -g agent-icloud -m 400 .env /etc/agent/icloud.env
 ```
 
@@ -132,7 +130,7 @@ Until the grant is in place the apps sit on "Getting Access" and show nothing. T
 First, prove the browser can reach iCloud data at all:
 
 ```
-sudo -u agent-icloud -H /opt/agent-icloud/.venv/bin/python /opt/agent-icloud/bin/session_check.py
+sudo -u agent-icloud -H /opt/agent-icloud/bin/icloud-mcp session-check
 ```
 
 It distinguishes the four answers that need four different fixes: healthy, signed out, needs a device approval, and no browser to talk to. Exit 0 is healthy.
@@ -155,7 +153,7 @@ A latch records that you have already been asked, so nothing retries in a loop a
 
 Do not restart the browser to fix this. A restart discards the warm tabs, costs the warm-up, and raises an approval prompt of its own, so a restart meant to satisfy a prompt creates one. A navigation is enough and leaves the browser standing.
 
-A genuinely expired session is the other failure and it looks different: `session_check.py` reports signed out rather than needs approval. That one is interactive, and it is step 6 again, tunnel and all, including the "Trust this browser" tick.
+A genuinely expired session is the other failure and it looks different: `icloud-mcp session-check` reports signed out rather than needs approval. That one is interactive, and it is step 6 again, tunnel and all, including the "Trust this browser" tick.
 
 Restarting the browser is a decision, never a side effect. Reloading unit files, moving these files and re-running the wrapper are all free. Restarting the browser or the display is not.
 

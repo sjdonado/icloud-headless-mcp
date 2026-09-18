@@ -1,4 +1,4 @@
-// Command icloud-resident is the resident headed Chromium holding the
+// Subcommand resident (icloud-mcp resident) is the resident headed
 // iCloud session: one browser process against the persisted profile, with
 // CDP on loopback for the tools to attach to.
 //
@@ -37,11 +37,7 @@ func chromiumBinary() (string, error) {
 	return "", fmt.Errorf("no Chromium found: set CHROMIUM_BIN")
 }
 
-func main() {
-	os.Exit(run())
-}
-
-func run() int {
+func runResident() int {
 	cfg := config.LoadEnv()
 	state := browser.State{Dir: cfg.StateDir, Shared: cfg.SharedState, CDP: cfg.CDP}
 	bin, err := chromiumBinary()

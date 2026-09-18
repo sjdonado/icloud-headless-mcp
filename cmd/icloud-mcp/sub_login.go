@@ -1,4 +1,4 @@
-// Command icloud-login runs the interactive first-login session
+// Subcommand login (icloud-mcp login) runs the interactive first-login
 // bootstrap: a headed Chromium on the persisted profile, waiting up to 20
 // minutes for the owner to sign in through VNC and complete 2FA. Tick
 // "Trust this browser" when Apple offers it, or the session dies on the
@@ -18,11 +18,7 @@ import (
 
 const loginTimeout = 20 * time.Minute
 
-func main() {
-	os.Exit(run())
-}
-
-func run() int {
+func runLogin() int {
 	cfg := config.LoadEnv()
 	state := browser.State{Dir: cfg.StateDir, Shared: cfg.SharedState, CDP: cfg.CDP}
 	cdpPort := cfg.CDPPort()
@@ -48,7 +44,7 @@ func run() int {
 	}
 	// Deviation from production, verify-rig shaped: the login browser also
 	// serves loopback CDP, so this command can poll for auth cookies and
-	// the tools (and session_check) can observe the login. Same loopback
+	// the tools (and session-check) can observe the login. Same loopback
 	// exposure as the resident.
 	cmd := exec.Command(bin, args...)
 	cmd.Stdout = os.Stderr
@@ -93,20 +89,4 @@ func run() int {
 		browser.SaveJar(state, cookies)
 	}
 	return 1
-}
-
-func chromiumBinary() (string, error) {
-	if bin := os.Getenv("CHROMIUM_BIN"); bin != "" {
-		return bin, nil
-	}
-	for _, name := range []string{"chromium", "chromium-browser", "google-chrome"} {
-		if path, err := exec.LookPath(name); err == nil {
-			return path, nil
-		}
-	}
-	matches, _ := filepath.Glob(os.Getenv("PLAYWRIGHT_BROWSERS_PATH") + "/chromium-*/chrome-linux/chrome")
-	if len(matches) > 0 {
-		return matches[0], nil
-	}
-	return "", fmt.Errorf("no Chromium found: set CHROMIUM_BIN")
 }

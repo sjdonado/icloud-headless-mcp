@@ -11,4 +11,4 @@ set -uo pipefail
 exec runuser -u agent-icloud -- \
   env DISPLAY=:99 PLAYWRIGHT_BROWSERS_PATH=/opt/playwright HOME=/opt/agent-icloud \
   ICLOUD_STATE=/opt/agent-icloud ICLOUD_SHARED_STATE=/var/lib/icloud-state \
-  /opt/agent-icloud/.venv/bin/python /opt/agent-icloud/bin/reask_access.py
+  /opt/agent-icloud/bin/icloud-mcp reask

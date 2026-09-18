@@ -21,4 +21,4 @@ set +a
 export HOME=/opt/agent-icloud
 export DISPLAY=:99
 export PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
-exec /opt/agent-icloud/.venv/bin/python /opt/agent-icloud/bin/server.py
+exec /opt/agent-icloud/bin/icloud-mcp

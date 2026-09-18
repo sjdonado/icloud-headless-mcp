@@ -1,5 +1,5 @@
-// Command icloud-reask re-asks Apple for web access by re-navigating the
-// Reminders tab, not by restarting the browser: a restart discards warm
+// Subcommand reask (icloud-mcp reask) re-asks Apple for web access
+// by re-navigating the Reminders tab, not by restarting the browser: a restart discards warm
 // tabs and raises an approval prompt of its own, while a navigation
 // re-requests the grant and leaves everything standing. One app, not two:
 // the grant covers iCloud.com data, so one navigation raises one prompt.
@@ -15,11 +15,7 @@ import (
 
 const remindersURL = "https://www.icloud.com/reminders/"
 
-func main() {
-	os.Exit(run())
-}
-
-func run() int {
+func runReask() int {
 	cfg := config.LoadEnv()
 	state := browser.State{Dir: cfg.StateDir, Shared: cfg.SharedState, CDP: cfg.CDP}
 	zone, err := cfg.LocalTimezone()

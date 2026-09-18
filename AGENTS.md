@@ -1,6 +1,6 @@
 # iCloud Headless MCP Everywhere (`icloud-headless-mcp`)
 
-One-process MCP server over stdio, reproducible on any Linux host as an MCP server for Hermes or any MCP client. `server.py` imports the five tool modules; the import is what registers the tools. The runtime spawns `stdio.sh` as a child process on the same host. There is no network listener.
+One static binary over stdio, reproducible on any Linux host as an MCP server for Hermes or any MCP client. `cmd/icloud-mcp` holds the server (default, no subcommand) and every helper as subcommands; `icloud-mcp help` lists them. The runtime spawns `stdio.sh` as a child process on the same host. There is no network listener.
 
 Start with `README.md` (overview, capabilities, critical caveats, contributing), `docs/ARCHITECTURE.md` (layout, session lifecycle, Drive mechanics, pitfalls), `docs/SETUP.md` (first-run sequence), and `SECURITY.md` (threat model, read before touching credentials or the session).
 
@@ -8,17 +8,27 @@ Start with `README.md` (overview, capabilities, critical caveats, contributing),
 
 See `docs/ARCHITECTURE.md` The layout; not repeated here.
 
-No `AGENTS.md` nesting, no task runner (`Makefile`, `justfile`, `pyproject.toml`, `package.json` all absent). Dependencies are `requirements.txt` (`caldav`, `vobject`, `mcp`, `playwright`).
+No `AGENTS.md` nesting, no task runner (`Makefile`, `justfile`, `pyproject.toml`, `package.json` all absent). Building needs a Go toolchain (`go.mod`); the host needs only the static binary plus a system Chromium. The Python tree (`server.py`, `tools/`, `icloud_lib/`) remains for rollback and is not on the install path.
 
 ## Prerequisites
 
-Target host is always-on 64-bit Linux, Python 3.11+, virtual X display (`xvfb`), headed Chromium via Playwright, and a private network (Tailscale or SSH tunnel) before the first login. Local macOS checkout can run the deterministic checks below but cannot run the browser stack, systemd units, or Apple-credential paths.
+Target host is always-on 64-bit Linux, virtual X display (`xvfb`), headed system Chromium, and a private network (Tailscale or SSH tunnel) before the first login. Local macOS checkout can run the deterministic checks below but cannot run the browser stack, systemd units, or Apple-credential paths.
 
 Never read `.env`, `cookies.json`, `*.vncpass`, or session state. `.env.example` is the readable contract. Never load the env file into a client unit; the calling uid must not read the app-specific password.
 
 ## Checks
 
-Deterministic, run from the repo root (verified on Python 3.14 without extra installs):
+Deterministic, run from the repo root:
+
+```
+go build ./...
+go vet ./...
+go test ./...
+GOOS=linux GOARCH=amd64 go build -o /dev/null ./cmd/icloud-mcp
+GOOS=linux GOARCH=arm64 go build -o /dev/null ./cmd/icloud-mcp
+```
+
+The rollback tree still has its own checks, also from the repo root:
 
 ```
 python3 -m unittest discover -s tests -v
@@ -31,16 +41,16 @@ Integration, defined but not runnable here (need the Linux host, service account
 
 ```
 sudo -n -u agent-icloud /opt/agent-icloud/bin/stdio.sh </dev/null
-sudo -u agent-icloud -H /opt/agent-icloud/.venv/bin/python /opt/agent-icloud/bin/session_check.py
+sudo -u agent-icloud -H /opt/agent-icloud/bin/icloud-mcp session-check
 ```
 
-Then one tool per surface: `list_calendars`, `list_mail`, `reminder_lists`, `notes_folders`, `drive_status`. `session_check.py` exit codes: 0 healthy, 1 signed out, 2 no browser, 3 needs device approval.
+Then one tool per surface: `list_calendars`, `list_mail`, `reminder_lists`, `notes_folders`, `drive_status`. `session-check` exit codes: 0 healthy, 1 signed out, 2 no browser, 3 needs device approval.
 
 ## Change guidance
 
-- DAV/IMAP (`tools/dav.py`, `tools/mail.py`): needs credentials only, no browser lock. After a change, re-test concurrency: `list_mail` while a Notes call holds its lock.
-- Browser-backed (`tools/notes.py`, `tools/reminders.py`): per-app locks, 60-90s calls are normal, cold app load longer. Keep the MCP timeout above the elicitation timeout (README uses 330s).
-- Drive (`tools/drive.py`, `icloud_lib/drive_libraries.py`, `bin/icloud_drive_fetch.py`): status only in the server; scheduling is outside the repo. Empty or unparseable `DRIVE_LIBRARIES` pulls nothing by design.
+- DAV/IMAP (`internal/dav`, `internal/mail`): needs credentials only, no browser lock. After a change, re-test concurrency: `list_mail` while a Notes call holds its lock.
+- Browser-backed (`internal/notes`, `internal/reminders`): per-app locks, 60-90s calls are normal, cold app load longer. Keep the MCP timeout above the elicitation timeout (README uses 330s).
+- Drive (`internal/drive`, `internal/dvlibraries`, `icloud-mcp drive-fetch`): status only in the server; scheduling is outside the repo. Empty or unparseable `DRIVE_LIBRARIES` pulls nothing by design.
 
 ## Constraints worth missing once
 
@@ -50,7 +60,7 @@ Full list in `docs/ARCHITECTURE.md` Pitfalls; the load-bearing subset:
 - Fresh app-page loads refuse 23:00-07:00 local (quiet hours); already-loaded tabs still work.
 - CalDAV Reminders store is dead (writes succeed, invisible everywhere). Reminders stay browser-backed; never restore them on CalDAV.
 - Calendar listings need `expand=True`; convert ISO offsets into the named `AGENT_TZ` zone before writing (fixed offsets serialize as wrong UTC hours).
-- IMAP: check `_select` result (missing mailbox leaves AUTH state); flags come from separate `UID SEARCH`; server-side search is not substring search, `search_mail` unions server plus local decoded pass.
+- IMAP: check the select result (missing mailbox leaves AUTH state); flags come from separate `UID SEARCH`; server-side search is not substring search, `search_mail` unions server plus local decoded pass.
 - Attachments: type denylist (incl. archives), size cap, sanitized basename, expiry; refusals go in `attachments_skipped`.
 - Notes body is canvas-rendered: open, copy, title-check, retry once, then refuse rather than return the wrong note.
 - Web apps are shadow DOM, virtualized, pointer-real: recursive `shadowRoot` walk, exact class-token match, full pointer event sequence, search box cleared via keyboard.

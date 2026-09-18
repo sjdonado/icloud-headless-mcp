@@ -1,4 +1,4 @@
-// Command icloud-session-check reports whether the resident browser can
+// Subcommand session-check (icloud-mcp session-check) reports whether the resident browser can
 // actually reach iCloud data.
 //
 // Exit 0 healthy, 1 signed out, 2 no browser to talk to, 3 needs a device
@@ -12,7 +12,7 @@ import (
 	"github.com/sjdonado/icloud-headless-mcp/internal/browser"
 )
 
-func main() {
+func runSessionCheck() int {
 	cdpURL := os.Getenv("ICLOUD_CDP")
 	if cdpURL == "" {
 		cdpURL = "http://127.0.0.1:9222"
@@ -21,12 +21,13 @@ func main() {
 	fmt.Println(msg)
 	switch outcome {
 	case browser.OK:
-		os.Exit(0)
+		return 0
 	case browser.SignedOut:
-		os.Exit(1)
+		return 1
 	case browser.Unreachable:
-		os.Exit(2)
+		return 2
 	case browser.NeedsApproval:
-		os.Exit(3)
+		return 3
 	}
+	return 0
 }
