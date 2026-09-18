@@ -2,8 +2,7 @@ package notes
 
 // Selector snippets for the Notes web app, probed on the live app. Class
 // tokens match exactly: substring matching catches wrappers that repeat
-// every entry. Copied verbatim with the Python implementation; the DOM is
-// the contract here, not the language.
+// every entry. The DOM is the contract here, not the language.
 
 const selectedFolderJS = `() => {
   let selected = '';

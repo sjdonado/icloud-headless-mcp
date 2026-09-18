@@ -23,7 +23,6 @@ Notes and Reminders each hold their own per-app lock, because there is one brows
 | `internal/queue`, `internal/drain` | the pending-write queue and the drain pass over it |
 | `systemd/` | six units: the display, the browser, VNC and noVNC, and the tab reaper with its timer |
 | `sudoers.d/` | two rules: the one wrapper a caller may spawn, and the re-ask |
-| `server.py`, `app.py`, `tools/`, `icloud_lib/`, `bin/*.py` | the previous Python implementation, kept in the tree for rollback. Not on the install path |
 
 `icloud-mcp` with no subcommand serves stdio, which is what `stdio.sh` spawns; the units and wrappers name the same binary with its subcommand, so the one-binary property is reviewable in one `ls`.
 

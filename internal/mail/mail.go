@@ -76,7 +76,7 @@ var attachDeny = map[string]bool{
 const attachSafe = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_ ()"
 
 // Client speaks IMAP and SMTP for one account. Connections are opened per
-// call and closed after, mirroring the Python module.
+// call and closed after.
 type Client struct {
 	cfg       *config.Config
 	imapAddr  string

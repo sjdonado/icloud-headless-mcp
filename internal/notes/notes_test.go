@@ -5,8 +5,8 @@ import (
 	"testing"
 )
 
-// The vectors from the Python self-test, verbatim: the failure modes this
-// converter exists for, executable.
+// The regression vectors, verbatim: the failure modes this converter
+// exists for, executable.
 func TestMarkdownVectors(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"1. first\n* a detail\n1. second\n* its detail\n",

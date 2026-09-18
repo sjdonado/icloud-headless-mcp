@@ -13,7 +13,6 @@
 #
 # Inside:
 #   go build ./... && go vet ./... && go test ./...
-#   python3 -m unittest discover -s tests -v
 #   Xvfb :99 -screen 0 1280x900x24 &
 #   chromium --remote-debugging-port=9222 about:blank &  # CDP smoke only
 #
@@ -29,7 +28,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    python3 python3-venv \
     xvfb x11vnc \
     chromium \
     sudo \

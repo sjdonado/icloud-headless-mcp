@@ -8,7 +8,7 @@ Start with `README.md` (overview, capabilities, critical caveats, contributing),
 
 See `docs/ARCHITECTURE.md` The layout; not repeated here.
 
-No `AGENTS.md` nesting, no task runner (`Makefile`, `justfile`, `pyproject.toml`, `package.json` all absent). Building needs a Go toolchain (`go.mod`); the host needs only the static binary plus a system Chromium. The Python tree (`server.py`, `tools/`, `icloud_lib/`) remains for rollback and is not on the install path.
+No `AGENTS.md` nesting, no task runner (`Makefile`, `justfile`, `pyproject.toml`, `package.json` all absent). Building needs a Go toolchain (`go.mod`); the host needs only the static binary plus a system Chromium.
 
 ## Prerequisites
 
@@ -28,14 +28,7 @@ GOOS=linux GOARCH=amd64 go build -o /dev/null ./cmd/icloud-mcp
 GOOS=linux GOARCH=arm64 go build -o /dev/null ./cmd/icloud-mcp
 ```
 
-The rollback tree still has its own checks, also from the repo root:
-
-```
-python3 -m unittest discover -s tests -v
-python3 -m py_compile app.py server.py tools/*.py icloud_lib/*.py bin/*.py
-```
-
-Both pass at time of writing (8 tests OK with the install-time dependencies present, 3 OK + 5 skipped without them). There is no configured linter or typecheck; do not invent one.
+All green at time of writing. There is no configured linter or typecheck; do not invent one.
 
 Integration, defined but not runnable here (need the Linux host, service account, resident browser, Apple credentials). Prefer these over reconstructing steps; see `README.md` Verification and `docs/SETUP.md` section 8:
 

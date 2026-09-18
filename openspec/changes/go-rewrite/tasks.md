@@ -32,4 +32,4 @@
 - [ ] 5.1 Run the full parity gate: all 23 tools plus every session-lifecycle scenario verified live against the specs
 - [ ] 5.2 Apply the wrapper/unit path swaps; verify `stdio.sh </dev/null` smoke and `session_check` from the calling uid
 - [ ] 5.3 Update install/dependencies/verification docs (`README.md`, `docs/SETUP.md`, `AGENTS.md`, `SECURITY.md` toolchain paragraphs)
-- [ ] 5.4 Remove Python from the install path; confirm rollback (wrapper revert) documented and tested once
+- [x] 5.4 Remove Python from the install path and the tree; rollback is reinstalling the previous release

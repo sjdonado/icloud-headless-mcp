@@ -12,8 +12,8 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
-// ServerID is the MCP server name. It matches the Python server and the
-// bridge id used in runtime wiring examples.
+// ServerID is the MCP server name. It matches the bridge id used in
+// runtime wiring examples.
 const ServerID = "icloud-headless-mcp"
 
 // Tier describes whether a tool writes and whether it asks first.
@@ -34,8 +34,9 @@ type ToolDef struct {
 	Asks        string
 }
 
-// Tools is the full 23-tool registry in README table order. Names are
-// verified against the Python @mcp.tool definitions, not invented here.
+// Tools is the full 23-tool registry in README table order. Names are the
+// frozen contract (README Tools table, openspec/changes/go-rewrite/specs/),
+// not invented here.
 var Tools = []ToolDef{
 	{"list_calendars", "List the calendars on the account.", TierReadOnly, "no"},
 	{"list_events", "List calendar events in a window.", TierReadOnly, "no"},
@@ -62,7 +63,7 @@ var Tools = []ToolDef{
 	{"drive_status", "When the Drive pull last ran and what it holds. Status only.", TierReadOnly, "no"},
 }
 
-// approveSchema mirrors the Python Approve model: one optional boolean and
+// approveSchema carries one optional boolean;
 // no required fields, so a plain accept with an empty object validates as
 // an approval while a client that renders the field can still say no.
 var approveSchema = map[string]any{
@@ -73,10 +74,10 @@ var approveSchema = map[string]any{
 }
 
 // AskApproval asks the owner through MCP elicitation. It returns "" when
-// approved, or the reason to refuse. It fails closed three ways, mirroring
-// app.ask_approval: a decline/cancel, an explicit no, and any failure to
-// ask at all (no elicitation capability, no back-channel) all refuse with
-// nothing executed.
+// approved, or the reason to refuse. It fails closed three ways: a
+// decline/cancel, an explicit no, and any failure to ask at all (no
+// elicitation capability, no back-channel) all refuse with nothing
+// executed.
 func AskApproval(ctx context.Context, s *server.MCPServer, question string) string {
 	res, err := s.RequestElicitation(ctx, mcp.ElicitationRequest{
 		Params: mcp.ElicitationParams{
@@ -100,7 +101,8 @@ func AskApproval(ctx context.Context, s *server.MCPServer, question string) stri
 }
 
 // ResultJSON renders a result map as a JSON text content block. Field names
-// are the parity contract: they match the Python result dict keys exactly.
+// are the frozen result keys (same contract as Tools): clients parse these
+// names.
 func ResultJSON(v any) (*mcp.CallToolResult, error) {
 	b, err := json.Marshal(v)
 	if err != nil {

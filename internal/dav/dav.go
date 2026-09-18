@@ -10,10 +10,12 @@
 package dav
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strconv"
@@ -21,6 +23,7 @@ import (
 	"time"
 
 	"github.com/emersion/go-ical"
+	"github.com/emersion/go-vcard"
 	"github.com/emersion/go-webdav"
 	"github.com/emersion/go-webdav/caldav"
 	"github.com/emersion/go-webdav/carddav"
@@ -34,9 +37,8 @@ const (
 )
 
 // Client speaks CalDAV and CardDAV for one account. A Client is built per
-// call, mirroring the Python module, which dials and discovers on every
-// tool call. Ask is the elicitation seam: production wires it to the MCP
-// approval gate, tests script it.
+// call, dialing and discovering on every tool call. Ask is the elicitation
+// seam: production wires it to the MCP approval gate, tests script it.
 type Client struct {
 	cfg   *config.Config
 	owner *time.Location
@@ -73,9 +75,9 @@ func (c *Client) authed() webdav.HTTPClient {
 	return webdav.HTTPClientWithBasicAuth(c.http, c.cfg.AppleID, c.cfg.AppPassword)
 }
 
-// calendars splits collections by what they hold, like the Python module:
-// iCloud keeps events and todos apart, and only VEVENT calendars are kept.
-// A calendar whose component set cannot be read is skipped, never fatal.
+// calendars splits collections by what they hold: iCloud keeps events and
+// todos apart, and only VEVENT calendars are kept. A calendar whose
+// component set cannot be read is skipped, never fatal.
 func (c *Client) calendars(ctx context.Context) (map[string]caldav.Calendar, error) {
 	authed := c.authed()
 	root, err := webdav.NewClient(authed, c.caldavEndpoint)
@@ -767,7 +769,15 @@ func (c *Client) SearchContacts(ctx context.Context, query string, limit int) (m
 			DataRequest: carddav.AddressDataRequest{AllProp: true},
 		})
 		if err != nil {
-			return nil, err
+			// go-webdav fails the whole REPORT on one malformed card,
+			// so fall back to per-card fetches that skip what does not
+			// parse. The fallback fails transport errors itself, so the
+			// original failure is reported, never masked as empty.
+			qerr := err
+			objs, err = queryCardsIndividually(ctx, c, cardc, book.Path)
+			if err != nil {
+				return nil, fmt.Errorf("search_contacts: address-book query failed: %v; fallback failed: %v", qerr, err)
+			}
 		}
 		for i := range objs {
 			card := objs[i].Card
@@ -796,4 +806,71 @@ func (c *Client) SearchContacts(ctx context.Context, query string, limit int) (m
 		out = []map[string]any{}
 	}
 	return map[string]any{"count": len(out), "contacts": out}, nil
+}
+
+// queryCardsIndividually lists a book's cards and fetches each one alone,
+// skipping what does not parse. Fallback for QueryAddressBook, which fails
+// the whole book on one malformed card. Only unparseable cards are
+// skipped; anything else failing is returned.
+func queryCardsIndividually(ctx context.Context, c *Client, cardc *carddav.Client, book string) ([]carddav.AddressObject, error) {
+	var hrefs []string
+	token := ""
+	for {
+		syncResp, err := cardc.SyncCollection(ctx, book, &carddav.SyncQuery{SyncToken: token})
+		if err != nil {
+			return nil, err
+		}
+		if token != "" && syncResp.SyncToken == token {
+			break // no progress: the same page again
+		}
+		for _, upd := range syncResp.Updated {
+			if strings.HasSuffix(upd.Path, ".vcf") {
+				hrefs = append(hrefs, upd.Path)
+			}
+		}
+		if syncResp.SyncToken == "" || len(syncResp.Updated) == 0 {
+			break
+		}
+		token = syncResp.SyncToken
+	}
+	var objs []carddav.AddressObject
+	for _, href := range hrefs {
+		ao, skip, err := getCard(ctx, c, href)
+		if err != nil {
+			return nil, err
+		}
+		if skip {
+			continue
+		}
+		objs = append(objs, *ao)
+	}
+	return objs, nil
+}
+
+// getCard fetches one card by href. A card that does not parse reports
+// skip; anything else failing, including a cancelled context, reports the
+// error. The body is decoded here rather than through GetAddressObject so
+// a MIME quirk or a metadata error never drops a readable card.
+func getCard(ctx context.Context, c *Client, href string) (ao *carddav.AddressObject, skip bool, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.carddavEndpoint+href, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	resp, err := c.authed().Do(req)
+	if err != nil {
+		return nil, false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, false, fmt.Errorf("GET %s: %s", href, resp.Status)
+	}
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, false, err
+	}
+	card, err := vcard.NewDecoder(bytes.NewReader(raw)).Decode()
+	if err != nil {
+		return nil, true, nil
+	}
+	return &carddav.AddressObject{Path: href, Card: card}, false, nil
 }

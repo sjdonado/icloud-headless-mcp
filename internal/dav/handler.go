@@ -10,8 +10,8 @@ import (
 	"github.com/sjdonado/icloud-headless-mcp/internal/mcpserver"
 )
 
-// newClient builds a per-call Client, mirroring the Python module, which
-// dials and discovers on every tool call.
+// newClient builds a per-call Client, which dials and discovers on every
+// tool call.
 func newClient(cfg *config.Config, ask func(ctx context.Context, question string) string) (*Client, error) {
 	c, err := Dial(cfg)
 	if err != nil {

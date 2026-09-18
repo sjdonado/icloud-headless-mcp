@@ -1,8 +1,6 @@
 // Package config is the account's environment contract: every key the
-// server reads, its default, and the fail-fast rule. It mirrors app.py,
-// icloud_tabs.local_timezone, and the per-module os.environ.get defaults,
-// so a missing required key names the key instead of failing somewhere
-// downstream.
+// server reads, its default, and the fail-fast rule, so a missing
+// required key names the key instead of failing later.
 package config
 
 import (
@@ -41,7 +39,7 @@ func getenv(key, def string) string {
 }
 
 // Load reads the environment once. A missing required key is an error naming
-// the key, mirroring the Python import-time KeyError with a better message.
+// the key at startup instead of failing on first use.
 func Load() (*Config, error) {
 	c := LoadEnv()
 	if c.AppleID == "" {
@@ -50,9 +48,8 @@ func Load() (*Config, error) {
 	if c.AppPassword == "" {
 		return nil, fmt.Errorf("missing required environment: ICLOUD_APP_PASSWORD")
 	}
-	// Required even when the TZ file would suffice, mirroring the Python
-	// import: a zone guessed later types the wrong hour into an Apple
-	// picker and nothing errors.
+	// Required even when the TZ file would suffice: a zone guessed later
+	// types the wrong hour into an Apple picker and nothing errors.
 	if c.AgentTZ == "" {
 		return nil, fmt.Errorf("missing required environment: AGENT_TZ")
 	}
@@ -60,8 +57,8 @@ func Load() (*Config, error) {
 }
 
 // LoadEnv reads the environment without requiring credentials. Helpers
-// that never touch DAV or IMAP (reask, drain, drive fetch, tab reaper)
-// run under it, mirroring Python modules that never import the account.
+// that must start without them (reask, drain, drive-fetch, resident,
+// login) run under it.
 func LoadEnv() *Config {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -97,9 +94,9 @@ func (c *Config) CDPPort() int {
 	return 9222
 }
 
-// else AGENT_TZ. Neither existing raises rather than guessing, mirroring
-// icloud_tabs.local_timezone: a zone guessed here types the wrong hour into
-// an Apple picker and nothing errors.
+// else AGENT_TZ. Neither existing raises rather than guessing: a zone
+// guessed here types the wrong hour into an Apple picker and nothing
+// errors.
 func (c *Config) LocalTimezone() (string, error) {
 	if raw, err := os.ReadFile(c.TZFile); err == nil {
 		if name := strings.TrimSpace(string(raw)); name != "" {

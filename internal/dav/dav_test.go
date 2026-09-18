@@ -2,6 +2,7 @@ package dav
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -385,6 +386,59 @@ func TestSearchContacts(t *testing.T) {
 	}
 	if msg, _ := out["error"].(string); msg != "empty query" {
 		t.Fatalf("blank query = %v", out)
+	}
+}
+
+func TestSearchContactsSkipsBrokenCard(t *testing.T) {
+	f, srv := newFakeDAV(t)
+	defer srv.Close()
+	f.mu.Lock()
+	f.objects[fakeBook+"broken.vcf"] = fxBroken
+	f.mu.Unlock()
+	c := testClient(t, nil, srv.URL, failOnAsk(t))
+	ctx := context.Background()
+	// The broken card's own words match nothing: it is skipped, not fatal.
+	out, err := c.SearchContacts(ctx, "sight", 10)
+	if err != nil {
+		t.Fatalf("SearchContacts with a broken card in the book: %v", err)
+	}
+	if out["count"] != 0 {
+		t.Fatalf("broken card matched = %v", out)
+	}
+	// The readable cards still match through the per-card fallback.
+	out, err = c.SearchContacts(ctx, "ada", 10)
+	if err != nil {
+		t.Fatalf("SearchContacts: %v", err)
+	}
+	contacts, _ := out["contacts"].([]map[string]any)
+	if len(contacts) != 1 || contacts[0]["name"] != "Ada Lovelace" {
+		t.Fatalf("SearchContacts(ada) with a broken card present = %v", out)
+	}
+	// The fallback enumerates with sync-collection rather than re-issuing
+	// the poisoning whole-book REPORT.
+	synced := false
+	for _, body := range f.reports[fakeBook] {
+		if strings.Contains(body, "sync-collection") {
+			synced = true
+		}
+	}
+	if !synced {
+		t.Fatalf("fallback never issued sync-collection, reports = %v", f.reports[fakeBook])
+	}
+}
+
+func TestSearchContactsGetFailureSurfaces(t *testing.T) {
+	f, srv := newFakeDAV(t)
+	defer srv.Close()
+	f.mu.Lock()
+	f.objects[fakeBook+"broken.vcf"] = fxBroken
+	f.failGET = map[string]int{fakeBook + "grace.vcf": http.StatusInternalServerError}
+	f.mu.Unlock()
+	c := testClient(t, nil, srv.URL, failOnAsk(t))
+	// A card whose fetch fails is a transport failure, not a broken card:
+	// it errors instead of reading as empty.
+	if _, err := c.SearchContacts(context.Background(), "grace", 10); err == nil {
+		t.Fatalf("SearchContacts with a 500 card fetch returned no error")
 	}
 }
 

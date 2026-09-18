@@ -178,7 +178,7 @@ How that is written down is the runtime's business rather than this server's, an
 
 ## Dependencies
 
-One static binary, `icloud-mcp`, holding the server and every helper as subcommands (`icloud-mcp help` lists them). Building it needs a Go toolchain; running it needs only a system Chromium beside it. The Python tree stays in the repository for rollback but is not on the install path.
+One static binary, `icloud-mcp`, holding the server and every helper as subcommands (`icloud-mcp help` lists them). Building it needs a Go toolchain; running it needs only a system Chromium beside it. Rollback is reinstalling the previous release: the same tarball steps with the older tag.
 
 ## Verification
 
@@ -203,4 +203,4 @@ The service account, paths, systemd units, sudoers rules, and runtime wiring in 
 
 ## Contributing
 
-Read [`SECURITY.md`](SECURITY.md) before touching credentials or the session. From the repo root, run `go build ./...`, `go vet ./...` and `go test ./...`; all must pass. The Python tree remains for rollback, so `python3 -m unittest discover -s tests -v` and `python3 -m py_compile app.py server.py tools/*.py icloud_lib/*.py bin/*.py` must pass too. There is no configured linter or typecheck. Keep the MCP timeout above the elicitation timeout, re-test `list_mail` while a Notes call holds its lock after concurrency changes, and never widen the sudoers rules beyond one exact command with no variable argument.
+Read [`SECURITY.md`](SECURITY.md) before touching credentials or the session. From the repo root, run `go build ./...`, `go vet ./...` and `go test ./...`; all must pass. There is no configured linter or typecheck. Keep the MCP timeout above the elicitation timeout, re-test `list_mail` while a Notes call holds its lock after concurrency changes, and never widen the sudoers rules beyond one exact command with no variable argument.
