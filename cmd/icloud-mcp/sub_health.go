@@ -36,16 +36,22 @@ func runHealthImport(args []string) int {
 	}
 	defer db.Close()
 	res, err := health.ImportDir(db, cfg.HealthExport, time.Now())
+	// Report first, fail after: files commit one transaction at a time,
+	// so a failing run leaves committed work behind, and "import failed"
+	// alone reads as "nothing happened". The operator re-running after a
+	// fix needs to know the state the store is already in.
+	seen, fresh, refreshed := 0, 0, 0
+	for _, r := range res {
+		fmt.Printf("%s: %d seen, %d new, %d updated\n", r.File, r.Seen, r.New, r.Updated)
+		seen += r.Seen
+		fresh += r.New
+		refreshed += r.Updated
+	}
+	fmt.Printf("%d files, %d rows seen, %d new, %d updated\n", len(res), seen, fresh, refreshed)
+	fmt.Printf("store: %s\n", cfg.HealthDB)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "import failed: %v\n", err)
 		return 1
 	}
-	seen, fresh := 0, 0
-	for _, r := range res {
-		fmt.Printf("%s: %d seen, %d new\n", r.File, r.Seen, r.New)
-		seen += r.Seen
-		fresh += r.New
-	}
-	fmt.Printf("%d files, %d rows seen, %d new\n", len(res), seen, fresh)
 	return 0
 }

@@ -62,12 +62,14 @@ func OpenRW(path string) (*sql.DB, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", path+"?_txlock=immediate")
 	if err != nil {
 		return nil, err
 	}
 	// Single connection: PRAGMAs below then hold for every statement on
 	// this handle, and the single-threaded importer wants no more.
+	// IMMEDIATE (not deferred) transactions serialize a timer run against
+	// a manual one at BEGIN time instead of failing busy at first write.
 	db.SetMaxOpenConns(1)
 	if _, err := db.Exec(Schema); err != nil {
 		_ = db.Close()

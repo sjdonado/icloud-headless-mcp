@@ -29,7 +29,7 @@ type Config struct {
 	DriveEtags     string // DRIVE_ETAGS, default $ICLOUD_STATE/state/drive-etags.json
 	DriveLibs      string // DRIVE_LIBRARIES, default "[]"
 	Transport      string // AGENT_MCP_TRANSPORT, default "stdio"
-	HealthDB       string // HEALTH_DB, default $ICLOUD_STATE/state/health.sqlite
+	HealthDB       string // HEALTH_DB, default $ICLOUD_STATE/state/health.sqlite. Owned exclusively by this service account: the extension's importer is its sole writer, so never point it at another uid's live store; adopting one means copying it into place (operator, manual migrate).
 	HealthExport   string // HEALTH_EXPORT_DIR, default "" (extension off)
 }
 

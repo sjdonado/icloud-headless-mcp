@@ -1,8 +1,10 @@
 package health
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,20 +44,20 @@ func populatedDB(t *testing.T) string {
 	}
 	defer db.Close()
 	root := t.TempDir()
-	writeFile(t, filepath.Join(root, "raw", "StepCount", "2026-09.jsonl"),
-		`{"uuid":"s1","metric":"StepCount","recordType":"q","start":"2026-09-17T08:00:00+02:00","end":"2026-09-17T08:30:00+02:00","localDate":"2026-09-17","timezone":"Europe/Amsterdam","value":5000,"unit":"count","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-17T08:31:00+02:00","schemaVersion":1}
-{"uuid":"s2","metric":"StepCount","recordType":"q","start":"2026-09-17T18:00:00+02:00","end":"2026-09-17T18:10:00+02:00","localDate":"2026-09-17","timezone":"Europe/Amsterdam","value":1000,"unit":"count","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-17T18:11:00+02:00","schemaVersion":1}
+	writeFile(t, filepath.Join(root, "StepCount", "2026-09.jsonl"),
+		`{"uuid":"s1","metric":"StepCount","recordType":"q","start":"2026-09-17T08:00:00+02:00","end":"2026-09-17T08:30:00+02:00","localDate":"2026-09-17","timezone":"Europe/Amsterdam","value":{"amount":5000,"type":"quantity"},"unit":"count","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-17T08:31:00+02:00","schemaVersion":1}
+{"uuid":"s2","metric":"StepCount","recordType":"q","start":"2026-09-17T18:00:00+02:00","end":"2026-09-17T18:10:00+02:00","localDate":"2026-09-17","timezone":"Europe/Amsterdam","value":{"amount":1000,"type":"quantity"},"unit":"count","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-17T18:11:00+02:00","schemaVersion":1}
 `)
-	writeFile(t, filepath.Join(root, "raw", "RestingHeartRate", "2026-09.jsonl"),
-		`{"uuid":"r1","metric":"RestingHeartRate","recordType":"q","start":"2026-09-17T06:00:00+02:00","end":"2026-09-17T06:01:00+02:00","localDate":"2026-09-17","timezone":"Europe/Amsterdam","value":52,"unit":"bpm","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-17T06:02:00+02:00","schemaVersion":1}
+	writeFile(t, filepath.Join(root, "RestingHeartRate", "2026-09.jsonl"),
+		`{"uuid":"r1","metric":"RestingHeartRate","recordType":"q","start":"2026-09-17T06:00:00+02:00","end":"2026-09-17T06:01:00+02:00","localDate":"2026-09-17","timezone":"Europe/Amsterdam","value":{"amount":52,"type":"quantity"},"unit":"bpm","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-17T06:02:00+02:00","schemaVersion":1}
 `)
-	writeFile(t, filepath.Join(root, "raw", "SleepAnalysis", "2026-09.jsonl"),
-		`{"uuid":"n1","metric":"SleepAnalysis","recordType":"c","start":"2026-09-16T23:00:00+02:00","end":"2026-09-16T23:50:00+02:00","localDate":"2026-09-16","timezone":"Europe/Amsterdam","value":{"code":4,"label":"deep sleep"},"unit":"","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-17T06:00:00+02:00","schemaVersion":1}
-{"uuid":"n2","metric":"SleepAnalysis","recordType":"c","start":"2026-09-16T23:50:00+02:00","end":"2026-09-17T01:00:00+02:00","localDate":"2026-09-17","timezone":"Europe/Amsterdam","value":{"code":2,"label":"core sleep"},"unit":"","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-17T06:00:00+02:00","schemaVersion":1}
+	writeFile(t, filepath.Join(root, "SleepAnalysis", "2026-09.jsonl"),
+		`{"uuid":"n1","metric":"SleepAnalysis","recordType":"c","start":"2026-09-16T23:00:00+02:00","end":"2026-09-16T23:50:00+02:00","localDate":"2026-09-16","timezone":"Europe/Amsterdam","value":{"code":4,"label":"deep sleep","type":"category"},"unit":"","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-17T06:00:00+02:00","schemaVersion":1}
+{"uuid":"n2","metric":"SleepAnalysis","recordType":"c","start":"2026-09-16T23:50:00+02:00","end":"2026-09-17T01:00:00+02:00","localDate":"2026-09-17","timezone":"Europe/Amsterdam","value":{"code":2,"label":"core sleep","type":"category"},"unit":"","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-17T06:00:00+02:00","schemaVersion":1}
 `)
-	writeFile(t, filepath.Join(root, "raw", "HeartRate", "2026-09.jsonl"),
-		`{"uuid":"h1","metric":"HeartRate","recordType":"q","start":"2026-09-17T07:00:00+02:00","end":"2026-09-17T07:20:00+02:00","localDate":"2026-09-17","timezone":"Europe/Amsterdam","value":130,"unit":"bpm","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-17T07:21:00+02:00","schemaVersion":1}
-{"uuid":"h2","metric":"HeartRate","recordType":"q","start":"2026-09-17T09:00:00+02:00","end":"2026-09-17T09:05:00+02:00","localDate":"2026-09-17","timezone":"Europe/Amsterdam","value":70,"unit":"bpm","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-17T09:06:00+02:00","schemaVersion":1}
+	writeFile(t, filepath.Join(root, "HeartRate", "2026-09.jsonl"),
+		`{"uuid":"h1","metric":"HeartRate","recordType":"q","start":"2026-09-17T07:00:00+02:00","end":"2026-09-17T07:20:00+02:00","localDate":"2026-09-17","timezone":"Europe/Amsterdam","value":{"amount":130,"type":"quantity"},"unit":"bpm","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-17T07:21:00+02:00","schemaVersion":1}
+{"uuid":"h2","metric":"HeartRate","recordType":"q","start":"2026-09-17T09:00:00+02:00","end":"2026-09-17T09:05:00+02:00","localDate":"2026-09-17","timezone":"Europe/Amsterdam","value":{"amount":70,"type":"quantity"},"unit":"bpm","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-17T09:06:00+02:00","schemaVersion":1}
 `)
 	if _, err := ImportDir(db, root, time.Now()); err != nil {
 		t.Fatal(err)
@@ -71,9 +73,13 @@ func TestStatusNamesBlindSpots(t *testing.T) {
 	}
 	var missing []string
 	for _, m := range out["missing"].([]map[string]any) {
-		missing = append(missing, m["metric"].(string))
+		r, _ := m["rollup"].(string)
+		missing = append(missing, r)
 		if m["reason"] == nil || m["reason"] == "" {
 			t.Fatalf("missing entry carries no reason: %v", m)
+		}
+		if hints, _ := m["folder_hints"].([]string); len(hints) == 0 {
+			t.Fatalf("missing entry names no folder hints: %v", m)
 		}
 	}
 	for _, want := range []string{"energy", "hrv"} {
@@ -233,10 +239,10 @@ func TestMain(m *testing.M) {
 }
 
 func TestSplitValueNullAndString(t *testing.T) {
-	if num, _, _, typ := splitValue([]byte("null")); num != nil || typ != "unknown" {
-		t.Fatalf("null should be unknown, got %v %q", num, typ)
+	if num, _, _, typ, err := splitValue([]byte("null")); err != nil || num != nil || typ != "unknown" {
+		t.Fatalf("null should be unknown, got %v %q err %v", num, typ, err)
 	}
-	if num, _, label, typ := splitValue([]byte(`"light sleep"`)); num != nil || label != "light sleep" || typ != "category" {
+	if num, _, label, typ, err := splitValue([]byte(`"light sleep"`)); err != nil || num != nil || label != "light sleep" || typ != "category" {
 		t.Fatalf("string value = (%v,%q,%q), want (nil,light sleep,category)", num, label, typ)
 	}
 }
@@ -244,11 +250,11 @@ func TestSplitValueNullAndString(t *testing.T) {
 func TestSplitHistorySumsTogether(t *testing.T) {
 	db, dbPath := testDB(t)
 	root := t.TempDir()
-	writeFile(t, filepath.Join(root, "raw", "StepCount", "2026-09.jsonl"),
-		`{"uuid":"a1","recordType":"q","start":"2026-09-17T08:00:00+02:00","end":"2026-09-17T08:01:00+02:00","localDate":"2026-09-17","timezone":"Europe/Amsterdam","value":100,"unit":"count","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-17T08:02:00+02:00","schemaVersion":1}
+	writeFile(t, filepath.Join(root, "StepCount", "2026-09.jsonl"),
+		`{"uuid":"a1","recordType":"q","start":"2026-09-17T08:00:00+02:00","end":"2026-09-17T08:01:00+02:00","localDate":"2026-09-17","timezone":"Europe/Amsterdam","value":{"amount":100,"type":"quantity"},"unit":"count","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-17T08:02:00+02:00","schemaVersion":1}
 `)
-	writeFile(t, filepath.Join(root, "raw", "steps", "2026-09.jsonl"),
-		`{"uuid":"a2","recordType":"q","start":"2026-09-17T09:00:00+02:00","end":"2026-09-17T09:01:00+02:00","localDate":"2026-09-17","timezone":"Europe/Amsterdam","value":200,"unit":"count","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-17T09:02:00+02:00","schemaVersion":1}
+	writeFile(t, filepath.Join(root, "steps", "2026-09.jsonl"),
+		`{"uuid":"a2","recordType":"q","start":"2026-09-17T09:00:00+02:00","end":"2026-09-17T09:01:00+02:00","localDate":"2026-09-17","timezone":"Europe/Amsterdam","value":{"amount":200,"type":"quantity"},"unit":"count","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-17T09:02:00+02:00","schemaVersion":1}
 `)
 	if _, err := ImportDir(db, root, time.Now()); err != nil {
 		t.Fatal(err)
@@ -267,8 +273,8 @@ func TestSleepKeysByOnsetLocalDate(t *testing.T) {
 	root := t.TempDir()
 	// Timestamps in +01:00 whose onset Format would read 2026-09-16 while
 	// the exporter stamped localDate 2026-09-17: the stamp wins.
-	writeFile(t, filepath.Join(root, "raw", "SleepAnalysis", "2026-09.jsonl"),
-		`{"uuid":"m1","metric":"SleepAnalysis","recordType":"c","start":"2026-09-16T23:30:00+01:00","end":"2026-09-17T00:30:00+01:00","localDate":"2026-09-17","timezone":"Europe/Amsterdam","value":{"code":2,"label":"core sleep"},"unit":"","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-17T06:00:00+02:00","schemaVersion":1}
+	writeFile(t, filepath.Join(root, "SleepAnalysis", "2026-09.jsonl"),
+		`{"uuid":"m1","metric":"SleepAnalysis","recordType":"c","start":"2026-09-16T23:30:00+01:00","end":"2026-09-17T00:30:00+01:00","localDate":"2026-09-17","timezone":"Europe/Amsterdam","value":{"code":2,"label":"core sleep","type":"category"},"unit":"","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-17T06:00:00+02:00","schemaVersion":1}
 `)
 	if _, err := ImportDir(db, root, time.Now()); err != nil {
 		t.Fatal(err)
@@ -284,9 +290,9 @@ func TestSleepKeysByOnsetLocalDate(t *testing.T) {
 func TestEffortNullDayAndSkips(t *testing.T) {
 	db, dbPath := testDB(t)
 	root := t.TempDir()
-	writeFile(t, filepath.Join(root, "raw", "HeartRate", "2026-09.jsonl"),
-		`{"uuid":"e1","metric":"HeartRate","recordType":"q","start":"2026-09-17T07:00:00+02:00","end":"2026-09-17T07:10:00+02:00","localDate":"2026-09-17","timezone":"Europe/Amsterdam","value":150,"unit":"bpm","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-17T07:11:00+02:00","schemaVersion":1}
-{"uuid":"e2","metric":"HeartRate","recordType":"q","start":"not-a-time","end":"2026-09-17T08:10:00+02:00","localDate":"2026-09-17","timezone":"Europe/Amsterdam","value":150,"unit":"bpm","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-17T08:11:00+02:00","schemaVersion":1}
+	writeFile(t, filepath.Join(root, "HeartRate", "2026-09.jsonl"),
+		`{"uuid":"e1","metric":"HeartRate","recordType":"q","start":"2026-09-17T07:00:00+02:00","end":"2026-09-17T07:10:00+02:00","localDate":"2026-09-17","timezone":"Europe/Amsterdam","value":{"amount":150,"type":"quantity"},"unit":"bpm","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-17T07:11:00+02:00","schemaVersion":1}
+{"uuid":"e2","metric":"HeartRate","recordType":"q","start":"not-a-time","end":"2026-09-17T08:10:00+02:00","localDate":"2026-09-17","timezone":"Europe/Amsterdam","value":{"amount":150,"type":"quantity"},"unit":"bpm","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-17T08:11:00+02:00","schemaVersion":1}
 `)
 	if _, err := ImportDir(db, root, time.Now()); err != nil {
 		t.Fatal(err)
@@ -348,5 +354,186 @@ func TestSelectGateSemicolons(t *testing.T) {
 	}
 	if _, err := SQL(cfg, "SELECT 1;;"); err == nil {
 		t.Fatal("double semicolon should be refused")
+	}
+}
+
+func TestStatusStalenessVerdict(t *testing.T) {
+	out := Status(fixtureConfig(t, populatedDB(t)))
+	if out["newest_sample_date"] != "2026-09-17" {
+		t.Fatalf("newest_sample_date = %v, want 2026-09-17", out["newest_sample_date"])
+	}
+	today, err := ownerToday(fixtureConfig(t, populatedDB(t)))
+	if err != nil {
+		t.Skip("no owner zone in test env")
+	}
+	wantDays, err := daysBetween("2026-09-17", today)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["days_since_newest"] != wantDays {
+		t.Fatalf("days_since_newest = %v, want %d", out["days_since_newest"], wantDays)
+	}
+	if out["stale"] != (wantDays > 1) {
+		t.Fatalf("stale = %v for %d days since newest, want %v", out["stale"], wantDays, wantDays > 1)
+	}
+	if last, _ := out["last_sample_import"].(map[string]any); last == nil || last["file"] == nil {
+		t.Fatalf("last_sample_import should name a sample file, got %v", out["last_sample_import"])
+	} else if f, _ := last["file"].(string); len(f) >= 12 && f[:12] == "_tombstones/" {
+		t.Fatalf("last_sample_import must never be a tombstone file, got %v", f)
+	}
+	// A tombstone file imported after every sample: last_import names it
+	// (literally true), last_sample_import must still name samples.
+	dbPath := filepath.Join(t.TempDir(), "stale.sqlite")
+	db, err := OpenRW(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "Zebra", "2026-09.jsonl"),
+		`{"uuid":"z1","recordType":"q","start":"2026-09-17T08:00:00+02:00","end":"2026-09-17T08:01:00+02:00","localDate":"2026-09-17","timezone":"Europe/Amsterdam","value":{"amount":5,"type":"quantity"},"unit":"count","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-17T08:02:00+02:00","schemaVersion":1}
+`)
+	writeFile(t, filepath.Join(root, "_tombstones", "2026-09.jsonl"),
+		"{\"uuid\":\"never-arrives\",\"recordedAt\":\"2026-09-18T00:00:00+02:00\"}\n")
+	if _, err := ImportDir(db, root, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	out2 := Status(fixtureConfig(t, dbPath))
+	lastFile, _ := out2["last_import"].(map[string]any)["file"].(string)
+	sampleFile, _ := out2["last_sample_import"].(map[string]any)["file"].(string)
+	if !strings.HasPrefix(lastFile, "_tombstones/") {
+		t.Fatalf("last_import should name the tombstone file here, got %v", lastFile)
+	}
+	if strings.HasPrefix(sampleFile, "_tombstones/") || !strings.Contains(sampleFile, "Zebra") {
+		t.Fatalf("last_sample_import should name the sample file, got %v", sampleFile)
+	}
+}
+
+func TestSplitValueTypedObjects(t *testing.T) {
+	num, _, _, typ, err := splitValue([]byte(`{"amount":58,"type":"quantity"}`))
+	if err != nil || typ != "quantity" || num == nil || *num != 58 {
+		t.Fatalf("typed quantity = (%v,%q) err %v, want (58,quantity) nil", num, typ, err)
+	}
+	_, code, label, typ, err := splitValue([]byte(`{"code":3,"label":"asleepCore","type":"category"}`))
+	if err != nil || typ != "category" || code == nil || *code != 3 || label != "asleepCore" {
+		t.Fatalf("typed category = (%v,%q,%q) err %v", code, label, typ, err)
+	}
+	if _, _, _, _, err := splitValue([]byte(`{"amount":1,"type":"mystery"}`)); err == nil {
+		t.Fatal("unknown value type should fail the row, not store it")
+	}
+	if _, _, _, _, err := splitValue([]byte(`{"type":"quantity"}`)); err == nil {
+		t.Fatal("quantity without amount should fail the row, not store a vanished number")
+	}
+}
+
+func TestDoubleImportPreservesValues(t *testing.T) {
+	db, _ := testDB(t)
+	root := t.TempDir()
+	line := `{"uuid":"d1","metric":"StepCount","recordType":"q","start":"2026-09-17T08:00:00+02:00","end":"2026-09-17T08:01:00+02:00","localDate":"2026-09-17","timezone":"Europe/Amsterdam","value":{"amount":999,"type":"quantity"},"unit":"count","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-17T08:02:00+02:00","schemaVersion":1}
+`
+	writeFile(t, filepath.Join(root, "StepCount", "2026-09.jsonl"), line)
+	if _, err := ImportDir(db, root, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	res, err := ImportDir(db, root, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range res {
+		if r.New != 0 || r.Updated != 0 {
+			t.Fatalf("identical re-import of %s reports new=%d updated=%d, want 0 0", r.File, r.New, r.Updated)
+		}
+	}
+	var got float64
+	var typ string
+	if err := db.QueryRow(`SELECT value_num, value_type FROM samples WHERE uuid='d1'`).Scan(&got, &typ); err != nil || got != 999 || typ != "quantity" {
+		t.Fatalf("stored row after double import = (%v,%q) err %v, want (999,quantity)", got, typ, err)
+	}
+}
+
+func TestChangedReimportCountsUpdated(t *testing.T) {
+	db, _ := testDB(t)
+	root := t.TempDir()
+	p := filepath.Join(root, "StepCount", "2026-09.jsonl")
+	writeFile(t, p, `{"uuid":"c9","metric":"StepCount","recordType":"q","start":"2026-09-17T08:00:00+02:00","end":"2026-09-17T08:01:00+02:00","localDate":"2026-09-17","timezone":"Europe/Amsterdam","value":{"amount":100,"type":"quantity"},"unit":"count","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-17T08:02:00+02:00","schemaVersion":1}
+`)
+	if _, err := ImportDir(db, root, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, p, `{"uuid":"c9","metric":"StepCount","recordType":"q","start":"2026-09-17T08:00:00+02:00","end":"2026-09-17T08:01:00+02:00","localDate":"2026-09-17","timezone":"Europe/Amsterdam","value":{"amount":200,"type":"quantity"},"unit":"count","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-17T08:02:00+02:00","schemaVersion":1}
+`)
+	res, err := ImportDir(db, root, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res) != 1 || res[0].New != 0 || res[0].Updated != 1 {
+		t.Fatalf("changed re-import = %+v, want 0 new 1 updated", res)
+	}
+	var got float64
+	if err := db.QueryRow(`SELECT value_num FROM samples WHERE uuid='c9'`).Scan(&got); err != nil || got != 200 {
+		t.Fatalf("refreshed value = %v err %v, want 200", got, err)
+	}
+}
+
+func TestWorkoutStoresWholeObject(t *testing.T) {
+	db, _ := testDB(t)
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "workout", "2026-09.jsonl"),
+		`{"uuid":"w1","metric":"workout","recordType":"HKWorkoutType","start":"2026-09-17T07:00:00+02:00","end":"2026-09-17T07:36:00+02:00","localDate":"2026-09-17","timezone":"Europe/Amsterdam","value":{"duration_s":2163,"totalDistance_m":2269.98,"totalEnergy_kcal":101.46,"type":"workout","workoutType":"walking"},"unit":"","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-17T07:37:00+02:00","schemaVersion":1}
+`)
+	if _, err := ImportDir(db, root, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	var typ, label string
+	var num sql.NullFloat64
+	var code sql.NullInt64
+	if err := db.QueryRow(`SELECT value_num, value_code, value_label, value_type FROM samples WHERE uuid='w1'`).Scan(&num, &code, &label, &typ); err != nil {
+		t.Fatal(err)
+	}
+	if typ != "workout" || num.Valid || code.Valid {
+		t.Fatalf("workout row = (%v,%v,%q,%q), want NULL numbers and workout type", num, code, label, typ)
+	}
+	for _, want := range []string{"2163", "walking"} {
+		if !strings.Contains(label, want) {
+			t.Fatalf("workout label %q should keep %q", label, want)
+		}
+	}
+}
+
+func TestAbsentStringsStoreNull(t *testing.T) {
+	db, _ := testDB(t)
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "StepCount", "2026-09.jsonl"),
+		`{"uuid":"n1","recordType":"q","start":"2026-09-17T08:00:00+02:00","end":"2026-09-17T08:01:00+02:00","localDate":"2026-09-17","timezone":"Europe/Amsterdam","value":{"amount":5,"type":"quantity"},"source":"s","sourceBundleId":"b","wasUserEntered":false,"schemaVersion":1}
+`)
+	if _, err := ImportDir(db, root, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	var unit, device, recorded sql.NullString
+	var label sql.NullString
+	if err := db.QueryRow(`SELECT unit, device, recorded_at, value_label FROM samples WHERE uuid='n1'`).Scan(&unit, &device, &recorded, &label); err != nil {
+		t.Fatal(err)
+	}
+	if unit.Valid || device.Valid || recorded.Valid || label.Valid {
+		t.Fatalf("absent fields should be NULL, got %v %v %v %v", unit, device, recorded, label)
+	}
+}
+
+func TestFailedRunReturnsProgress(t *testing.T) {
+	db, _ := testDB(t)
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "aaa", "2026-09.jsonl"),
+		`{"uuid":"g1","recordType":"q","start":"2026-09-17T08:00:00+02:00","end":"2026-09-17T08:01:00+02:00","localDate":"2026-09-17","timezone":"Europe/Amsterdam","value":{"amount":5,"type":"quantity"},"unit":"count","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-17T08:02:00+02:00","schemaVersion":1}
+`)
+	writeFile(t, filepath.Join(root, "zzz", "2026-09.jsonl"),
+		`{"uuid":"b1","recordType":"q","start":"2026-09-17T08:00:00+02:00","end":"2026-09-17T08:01:00+02:00","localDate":"2026-09-17","timezone":"Europe/Amsterdam","value":{"amount":1,"type":"mystery"},"unit":"count","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-17T08:02:00+02:00","schemaVersion":1}
+`)
+	res, err := ImportDir(db, root, time.Now())
+	if err == nil {
+		t.Fatal("unknown value type should fail the run")
+	}
+	if len(res) != 1 || res[0].New != 1 {
+		t.Fatalf("failed run should still return the committed file, got %+v", res)
 	}
 }

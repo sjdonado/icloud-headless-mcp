@@ -6,7 +6,7 @@ The Drive pull already stages iCloud Drive app-export folders onto the host, but
 
 ## What Changes
 
-- New `health-import` subcommand: parses `raw/<metric>/YYYY-MM.jsonl` plus `_tombstones/YYYY-MM.jsonl` out of a configured export directory and upserts into SQLite. Idempotent on sample `uuid`; unknown metric folders import rather than reject; tombstones apply even when they arrive before their sample.
+- New `health-import` subcommand: parses top-level `<metric>/YYYY-MM.jsonl` plus sibling `_tombstones/YYYY-MM.jsonl` out of a configured export directory and upserts into SQLite. Idempotent on sample `uuid`; unknown metric folders import rather than reject; tombstones apply even when they arrive before their sample. A root with directories but zero readable sample files fails loudly, never reports a zero-new success.
 - New read-only MCP tool group (`health_status`, `health_days`, `health_sleep`, `health_effort`, `health_recovery`, `health_sql`): rollups and one guarded read-only SELECT. Only the importer opens the database read-write.
 - New neutral config keys (database path, export directory, schedule inputs), documented in README and `.env.example`. No source-app name in code or defaults.
 - New daily background job (systemd timer, following the tab-reaper precedent) running the importer. Drive-pull scheduling stays outside the repo, unchanged.

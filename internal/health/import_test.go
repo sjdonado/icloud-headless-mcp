@@ -32,10 +32,10 @@ func writeFile(t *testing.T, path, body string) {
 	}
 }
 
-const stepLine = `{"uuid":"step-1","metric":"steps","recordType":"HKQuantityTypeIdentifierStepCount","start":"2026-09-01T08:00:00+02:00","end":"2026-09-01T08:01:00+02:00","localDate":"2026-09-01","timezone":"Europe/Amsterdam","value":120,"unit":"count","source":"test-source","sourceBundleId":"com.example.test","device":"iPhone","wasUserEntered":false,"recordedAt":"2026-09-01T08:02:00+02:00","schemaVersion":1}
+const stepLine = `{"uuid":"step-1","metric":"steps","recordType":"HKQuantityTypeIdentifierStepCount","start":"2026-09-01T08:00:00+02:00","end":"2026-09-01T08:01:00+02:00","localDate":"2026-09-01","timezone":"Europe/Amsterdam","value":{"amount":120,"type":"quantity"},"unit":"count","source":"test-source","sourceBundleId":"com.example.test","device":"iPhone","wasUserEntered":false,"recordedAt":"2026-09-01T08:02:00+02:00","schemaVersion":1}
 `
 
-const sleepLine = `{"uuid":"sleep-1","metric":"sleep","recordType":"HKCategoryTypeIdentifierSleepAnalysis","start":"2026-09-01T23:10:00+02:00","end":"2026-09-02T00:40:00+02:00","localDate":"2026-09-01","timezone":"Europe/Amsterdam","value":{"code":4,"label":"deep sleep"},"unit":"","source":"test-source","sourceBundleId":"com.example.test","device":"Watch","wasUserEntered":false,"recordedAt":"2026-09-02T06:00:00+02:00","schemaVersion":1}
+const sleepLine = `{"uuid":"sleep-1","metric":"sleep","recordType":"HKCategoryTypeIdentifierSleepAnalysis","start":"2026-09-01T23:10:00+02:00","end":"2026-09-02T00:40:00+02:00","localDate":"2026-09-01","timezone":"Europe/Amsterdam","value":{"code":4,"label":"deep sleep","type":"category"},"unit":"","source":"test-source","sourceBundleId":"com.example.test","device":"Watch","wasUserEntered":false,"recordedAt":"2026-09-02T06:00:00+02:00","schemaVersion":1}
 `
 
 func count(t *testing.T, db *sql.DB, q string, args ...any) int {
@@ -50,8 +50,8 @@ func count(t *testing.T, db *sql.DB, q string, args ...any) int {
 func TestImportQuantityAndCategory(t *testing.T) {
 	db, _ := testDB(t)
 	root := t.TempDir()
-	writeFile(t, filepath.Join(root, "raw", "steps", "2026-09.jsonl"), stepLine)
-	writeFile(t, filepath.Join(root, "raw", "sleep", "2026-09.jsonl"), sleepLine)
+	writeFile(t, filepath.Join(root, "steps", "2026-09.jsonl"), stepLine)
+	writeFile(t, filepath.Join(root, "sleep", "2026-09.jsonl"), sleepLine)
 	res, err := ImportDir(db, root, time.Date(2026, 9, 18, 12, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatal(err)
@@ -76,8 +76,8 @@ func TestImportQuantityAndCategory(t *testing.T) {
 func TestImportUnknownMetricAndReimport(t *testing.T) {
 	db, _ := testDB(t)
 	root := t.TempDir()
-	writeFile(t, filepath.Join(root, "raw", "mindful-frobnicate", "2026-09.jsonl"),
-		`{"uuid":"step-1","recordType":"HKQuantityTypeIdentifierStepCount","start":"2026-09-01T08:00:00+02:00","end":"2026-09-01T08:01:00+02:00","localDate":"2026-09-01","timezone":"Europe/Amsterdam","value":120,"unit":"count","source":"test-source","sourceBundleId":"com.example.test","device":"iPhone","wasUserEntered":false,"recordedAt":"2026-09-01T08:02:00+02:00","schemaVersion":1}
+	writeFile(t, filepath.Join(root, "mindful-frobnicate", "2026-09.jsonl"),
+		`{"uuid":"step-1","recordType":"HKQuantityTypeIdentifierStepCount","start":"2026-09-01T08:00:00+02:00","end":"2026-09-01T08:01:00+02:00","localDate":"2026-09-01","timezone":"Europe/Amsterdam","value":{"amount":120,"type":"quantity"},"unit":"count","source":"test-source","sourceBundleId":"com.example.test","device":"iPhone","wasUserEntered":false,"recordedAt":"2026-09-01T08:02:00+02:00","schemaVersion":1}
 `)
 	res, err := ImportDir(db, root, time.Now())
 	if err != nil {
@@ -112,7 +112,7 @@ func TestTombstoneBeforeSample(t *testing.T) {
 	if got := count(t, db, `SELECT COUNT(*) FROM tombstones WHERE uuid='step-9' AND applied=0`); got != 1 {
 		t.Fatal("early tombstone should wait stored and unapplied")
 	}
-	writeFile(t, filepath.Join(root, "raw", "steps", "2026-09.jsonl"),
+	writeFile(t, filepath.Join(root, "steps", "2026-09.jsonl"),
 		"{\"uuid\":\"step-9\",\"metric\":\"steps\",\"recordType\":\"x\",\"start\":\"2026-09-09T08:00:00+02:00\",\"end\":\"2026-09-09T08:01:00+02:00\",\"localDate\":\"2026-09-09\",\"timezone\":\"Europe/Amsterdam\",\"value\":50,\"unit\":\"count\",\"source\":\"s\",\"sourceBundleId\":\"b\",\"device\":\"d\",\"wasUserEntered\":false,\"recordedAt\":\"2026-09-09T08:02:00+02:00\",\"schemaVersion\":1}\n")
 	if _, err := ImportDir(db, root, time.Now()); err != nil {
 		t.Fatal(err)
@@ -133,14 +133,14 @@ func TestRoundTripGeneratedMonth(t *testing.T) {
 	// which the tombstone file deletes (one before its sample arrives).
 	for i := 0; i < 500; i++ {
 		day := 1 + i%30
-		first.WriteString(`{"uuid":"g-step-` + itoa(i) + `","metric":"StepCount","recordType":"q","start":"2026-09-` + pad(day) + `T08:00:00+02:00","end":"2026-09-` + pad(day) + `T08:01:00+02:00","localDate":"2026-09-` + pad(day) + `","timezone":"Europe/Amsterdam","value":` + itoa(100+i) + `,"unit":"count","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-` + pad(day) + `T08:02:00+02:00","schemaVersion":1}` + "\n")
+		first.WriteString(`{"uuid":"g-step-` + itoa(i) + `","metric":"StepCount","recordType":"q","start":"2026-09-` + pad(day) + `T08:00:00+02:00","end":"2026-09-` + pad(day) + `T08:01:00+02:00","localDate":"2026-09-` + pad(day) + `","timezone":"Europe/Amsterdam","value":{"amount":` + itoa(100+i) + `,"type":"quantity"},"unit":"count","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-` + pad(day) + `T08:02:00+02:00","schemaVersion":1}` + "\n")
 	}
 	for i := 0; i < 60; i++ {
 		day := 1 + i%30
-		second.WriteString(`{"uuid":"g-sleep-` + itoa(i) + `","metric":"SleepAnalysis","recordType":"c","start":"2026-09-` + pad(day) + `T23:00:00+02:00","end":"2026-09-` + pad(day) + `T23:30:00+02:00","localDate":"2026-09-` + pad(day) + `","timezone":"Europe/Amsterdam","value":{"code":2,"label":"core sleep"},"unit":"","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-` + pad(day) + `T06:00:00+02:00","schemaVersion":1}` + "\n")
+		second.WriteString(`{"uuid":"g-sleep-` + itoa(i) + `","metric":"SleepAnalysis","recordType":"c","start":"2026-09-` + pad(day) + `T23:00:00+02:00","end":"2026-09-` + pad(day) + `T23:30:00+02:00","localDate":"2026-09-` + pad(day) + `","timezone":"Europe/Amsterdam","value":{"code":2,"label":"core sleep","type":"category"},"unit":"","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-` + pad(day) + `T06:00:00+02:00","schemaVersion":1}` + "\n")
 	}
-	writeFile(t, filepath.Join(root, "raw", "StepCount", "2026-09.jsonl"), first.String())
-	writeFile(t, filepath.Join(root, "raw", "SleepAnalysis", "2026-09.jsonl"), second.String())
+	writeFile(t, filepath.Join(root, "StepCount", "2026-09.jsonl"), first.String())
+	writeFile(t, filepath.Join(root, "SleepAnalysis", "2026-09.jsonl"), second.String())
 	writeFile(t, filepath.Join(root, "_tombstones", "2026-09.jsonl"),
 		"{\"uuid\":\"g-step-7\",\"recordedAt\":\"2026-09-10T00:00:00+02:00\"}\n"+
 			"{\"uuid\":\"g-sleep-3\",\"recordedAt\":\"2026-09-10T00:00:00+02:00\"}\n")
@@ -152,10 +152,13 @@ func TestRoundTripGeneratedMonth(t *testing.T) {
 	for _, r := range res {
 		fresh += r.New
 	}
-	// Tombstoned uuids never materialize, whichever side arrived first:
-	// 560 rows minus the 2 deleted, all in one pass.
-	if fresh != 558 {
-		t.Fatalf("first import new = %d, want 558", fresh)
+	// Sort order puts StepCount/SleepAnalysis before _tombstones here, so
+	// all 560 samples insert first and the two tombstones delete after:
+	// New counts inserts while the store converges to 558 either way.
+	// The reverse order (tombstones first, skipped inserts) is covered by
+	// TestTombstoneBeforeSample.
+	if fresh != 560 {
+		t.Fatalf("first import new = %d, want 560 inserts", fresh)
 	}
 	if got := count(t, db, `SELECT COUNT(*) FROM samples`); got != 558 {
 		t.Fatalf("stored rows = %d, want 558", got)
@@ -165,8 +168,8 @@ func TestRoundTripGeneratedMonth(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, r := range res {
-		if r.New != 0 {
-			t.Fatalf("second import of %s reports %d new rows, want 0", r.File, r.New)
+		if r.New != 0 || r.Updated != 0 {
+			t.Fatalf("second import of %s reports new=%d updated=%d, want 0 0", r.File, r.New, r.Updated)
 		}
 	}
 	if got := count(t, db, `SELECT COUNT(*) FROM samples`); got != 558 {
@@ -183,4 +186,46 @@ func pad(n int) string {
 
 func itoa(n int) string {
 	return strconv.Itoa(n)
+}
+
+func TestMismatchLayoutFailsLoud(t *testing.T) {
+	db, _ := testDB(t)
+	// The old raw/ level: a directory exists, zero sample files read.
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "raw", "steps", "2026-09.jsonl"), stepLine)
+	writeFile(t, filepath.Join(root, "_tombstones", "2026-09.jsonl"),
+		"{\"uuid\":\"x\",\"recordedAt\":\"2026-09-10T00:00:00+02:00\"}\n")
+	if _, err := ImportDir(db, root, time.Now()); err == nil {
+		t.Fatal("raw/-style root should fail loudly, not report success")
+	} else if !strings.Contains(err.Error(), "raw") {
+		t.Fatalf("mismatch error should name what it found: %v", err)
+	}
+	if got := count(t, db, `SELECT COUNT(*) FROM samples`); got != 0 {
+		t.Fatalf("failed run should ingest nothing, stored %d", got)
+	}
+}
+
+func TestTombstonesOnlyFailsLoud(t *testing.T) {
+	db, _ := testDB(t)
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "photos", "note.txt"), "not jsonl\n")
+	writeFile(t, filepath.Join(root, "_tombstones", "2026-09.jsonl"),
+		"{\"uuid\":\"x\",\"recordedAt\":\"2026-09-10T00:00:00+02:00\"}\n")
+	if _, err := ImportDir(db, root, time.Now()); err == nil {
+		t.Fatal("junk dirs with no sample files should fail loudly")
+	} else if !strings.Contains(err.Error(), "photos") {
+		t.Fatalf("mismatch error should name what it found: %v", err)
+	}
+}
+
+func TestEmptyRootSucceedsQuiet(t *testing.T) {
+	db, _ := testDB(t)
+	root := t.TempDir()
+	res, err := ImportDir(db, root, time.Now())
+	if err != nil {
+		t.Fatalf("empty root (nothing staged yet) should succeed: %v", err)
+	}
+	if len(res) != 0 {
+		t.Fatalf("empty root should import zero files, got %+v", res)
+	}
 }

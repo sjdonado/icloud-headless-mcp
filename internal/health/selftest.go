@@ -14,10 +14,11 @@ type selfTestCase struct {
 	run  func(db *sql.DB) error
 }
 
-// SelfTest runs the six contract checks with no filesystem or network:
-// envelope parsing for a quantity and a category, an unknown metric
-// folder, a tombstone arriving before its sample, a re-import producing
-// zero new rows, and the day rollup. It returns one line per case.
+// SelfTest runs the seven contract checks with no filesystem or network:
+// envelope parsing for a quantity and a category (real object shapes), an
+// unknown metric folder, a tombstone arriving before its sample, a
+// re-import producing zero new rows, a double import preserving the stored
+// number, and the day rollup. It returns one line per case.
 func SelfTest() (string, bool) {
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
@@ -29,7 +30,7 @@ func SelfTest() (string, bool) {
 	}
 	cases := []selfTestCase{
 		{"envelope-quantity", func(db *sql.DB) error {
-			n, err := importLine(db, []byte(`{"uuid":"q1","metric":"steps","recordType":"q","start":"2026-09-01T08:00:00+02:00","end":"2026-09-01T08:01:00+02:00","localDate":"2026-09-01","timezone":"Europe/Amsterdam","value":300,"unit":"count","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-01T08:02:00+02:00","schemaVersion":1}`), "steps", false)
+			n, _, err := importLine(db, []byte(`{"uuid":"q1","metric":"steps","recordType":"q","start":"2026-09-01T08:00:00+02:00","end":"2026-09-01T08:01:00+02:00","localDate":"2026-09-01","timezone":"Europe/Amsterdam","value":{"amount":300,"type":"quantity"},"unit":"count","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-01T08:02:00+02:00","schemaVersion":1}`), "steps", false)
 			if err != nil || n != 1 {
 				return fmt.Errorf("quantity line new=%d err=%v, want 1 nil", n, err)
 			}
@@ -40,7 +41,7 @@ func SelfTest() (string, bool) {
 			return nil
 		}},
 		{"envelope-category", func(db *sql.DB) error {
-			n, err := importLine(db, []byte(`{"uuid":"c1","metric":"sleep","recordType":"c","start":"2026-09-01T23:00:00+02:00","end":"2026-09-02T00:30:00+02:00","localDate":"2026-09-01","timezone":"Europe/Amsterdam","value":{"code":4,"label":"deep sleep"},"unit":"","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-02T06:00:00+02:00","schemaVersion":1}`), "sleep", false)
+			n, _, err := importLine(db, []byte(`{"uuid":"c1","metric":"sleep","recordType":"c","start":"2026-09-01T23:00:00+02:00","end":"2026-09-02T00:30:00+02:00","localDate":"2026-09-01","timezone":"Europe/Amsterdam","value":{"code":4,"label":"deep sleep","type":"category"},"unit":"","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-02T06:00:00+02:00","schemaVersion":1}`), "sleep", false)
 			if err != nil || n != 1 {
 				return fmt.Errorf("category line new=%d err=%v, want 1 nil", n, err)
 			}
@@ -52,17 +53,17 @@ func SelfTest() (string, bool) {
 			return nil
 		}},
 		{"unknown-metric", func(db *sql.DB) error {
-			n, err := importLine(db, []byte(`{"uuid":"u1","recordType":"x","start":"2026-09-01T08:00:00+02:00","end":"2026-09-01T08:01:00+02:00","localDate":"2026-09-01","timezone":"Europe/Amsterdam","value":1,"unit":"u","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-01T08:02:00+02:00","schemaVersion":1}`), "never-seen", false)
+			n, _, err := importLine(db, []byte(`{"uuid":"u1","recordType":"x","start":"2026-09-01T08:00:00+02:00","end":"2026-09-01T08:01:00+02:00","localDate":"2026-09-01","timezone":"Europe/Amsterdam","value":{"amount":1,"type":"quantity"},"unit":"u","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-01T08:02:00+02:00","schemaVersion":1}`), "never-seen", false)
 			if err != nil || n != 1 {
 				return fmt.Errorf("unknown metric new=%d err=%v, want 1 nil", n, err)
 			}
 			return nil
 		}},
 		{"early-tombstone", func(db *sql.DB) error {
-			if _, err := importLine(db, []byte(`{"uuid":"gone","recordedAt":"2026-09-10T00:00:00+02:00"}`), "", true); err != nil {
+			if _, _, err := importLine(db, []byte(`{"uuid":"gone","recordedAt":"2026-09-10T00:00:00+02:00"}`), "", true); err != nil {
 				return err
 			}
-			n, err := importLine(db, []byte(`{"uuid":"gone","metric":"steps","recordType":"q","start":"2026-09-09T08:00:00+02:00","end":"2026-09-09T08:01:00+02:00","localDate":"2026-09-09","timezone":"Europe/Amsterdam","value":10,"unit":"count","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-09T08:02:00+02:00","schemaVersion":1}`), "steps", false)
+			n, _, err := importLine(db, []byte(`{"uuid":"gone","metric":"steps","recordType":"q","start":"2026-09-09T08:00:00+02:00","end":"2026-09-09T08:01:00+02:00","localDate":"2026-09-09","timezone":"Europe/Amsterdam","value":{"amount":10,"type":"quantity"},"unit":"count","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-09T08:02:00+02:00","schemaVersion":1}`), "steps", false)
 			if err != nil {
 				return err
 			}
@@ -74,13 +75,28 @@ func SelfTest() (string, bool) {
 			return nil
 		}},
 		{"reimport-zero-new", func(db *sql.DB) error {
-			line := []byte(`{"uuid":"r1","metric":"steps","recordType":"q","start":"2026-09-01T08:00:00+02:00","end":"2026-09-01T08:01:00+02:00","localDate":"2026-09-01","timezone":"Europe/Amsterdam","value":7,"unit":"count","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-01T08:02:00+02:00","schemaVersion":1}`)
-			if _, err := importLine(db, line, "steps", false); err != nil {
+			line := []byte(`{"uuid":"r1","metric":"steps","recordType":"q","start":"2026-09-01T08:00:00+02:00","end":"2026-09-01T08:01:00+02:00","localDate":"2026-09-01","timezone":"Europe/Amsterdam","value":{"amount":7,"type":"quantity"},"unit":"count","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-01T08:02:00+02:00","schemaVersion":1}`)
+			if _, _, err := importLine(db, line, "steps", false); err != nil {
 				return err
 			}
-			n, err := importLine(db, line, "steps", false)
-			if err != nil || n != 0 {
-				return fmt.Errorf("re-import new=%d err=%v, want 0 nil", n, err)
+			n, u, err := importLine(db, line, "steps", false)
+			if err != nil || n != 0 || u != 0 {
+				return fmt.Errorf("re-import new=%d updated=%d err=%v, want 0 0 nil", n, u, err)
+			}
+			return nil
+		}},
+		{"reimport-keeps-values", func(db *sql.DB) error {
+			line := []byte(`{"uuid":"k1","metric":"steps","recordType":"q","start":"2026-09-03T08:00:00+02:00","end":"2026-09-03T08:01:00+02:00","localDate":"2026-09-03","timezone":"Europe/Amsterdam","value":{"amount":42,"type":"quantity"},"unit":"count","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-03T08:02:00+02:00","schemaVersion":1}`)
+			if _, _, err := importLine(db, line, "steps", false); err != nil {
+				return err
+			}
+			if _, _, err := importLine(db, line, "steps", false); err != nil {
+				return err
+			}
+			var got float64
+			var typ string
+			if err := db.QueryRow(`SELECT value_num, value_type FROM samples WHERE uuid='k1'`).Scan(&got, &typ); err != nil || got != 42 || typ != "quantity" {
+				return fmt.Errorf("stored row after double import = (%v,%q) err %v, want (42,quantity)", got, typ, err)
 			}
 			return nil
 		}},

@@ -140,14 +140,16 @@ func Status(cfg *config.Config) map[string]any {
 	}
 	present := 0
 	for rows.Next() {
-		var m, first, last, recorded string
+		var m string
+		var first, last sql.NullString
+		var recorded sql.NullString
 		var n int
 		if err := rows.Scan(&m, &n, &first, &last, &recorded); err != nil {
 			rows.Close()
 			return map[string]any{"error": err.Error()}
 		}
 		present++
-		metrics[m] = map[string]any{"samples": n, "first_date": first, "last_date": last, "latest_recorded_at": recorded}
+		metrics[m] = map[string]any{"samples": n, "first_date": nullString(first), "last_date": nullString(last), "latest_recorded_at": nullString(recorded)}
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -161,7 +163,16 @@ func Status(cfg *config.Config) map[string]any {
 	var missing []map[string]any
 	for _, want := range metricTokens {
 		if len(resolved[want.key]) == 0 {
-			missing = append(missing, map[string]any{"metric": want.key, "reason": "no samples imported"})
+			// Named "rollup", not "metric": these keys name query
+			// inputs with no backing data, and no stored metric name
+			// exists for them. Calling the field "metric" promised a
+			// match against the metrics map that a model cannot make.
+			// folder_hints carries the substrings resolution tried, so
+			// an operator can map their folders to the gap.
+			missing = append(missing, map[string]any{
+				"rollup": want.key, "reason": "no samples imported",
+				"folder_hints": append([]string{}, want.tokens...),
+			})
 		}
 	}
 	if missing == nil {
@@ -177,13 +188,59 @@ func Status(cfg *config.Config) map[string]any {
 	if err := db.QueryRow(`SELECT file_name, metric, rows_seen, rows_new, imported_at FROM imports ORDER BY id DESC LIMIT 1`).Scan(&fname, &fmetric, &seen, &fresh, &at); err == nil {
 		lastImport = map[string]any{"file": fname, "metric": fmetric, "rows_seen": seen, "rows_new": fresh, "at": at}
 	}
+	// Newest sample import, distinctly from the newest file of any kind: a
+	// tombstones-only run is literally true as "last import" and reads as
+	// a mistake, so sample freshness gets its own row.
+	var lastSample map[string]any
+	var sname, smetric, sat string
+	var sseen, sfresh int
+	if err := db.QueryRow(`SELECT file_name, metric, rows_seen, rows_new, imported_at FROM imports WHERE metric != '' ORDER BY id DESC LIMIT 1`).Scan(&sname, &smetric, &sseen, &sfresh, &sat); err == nil {
+		lastSample = map[string]any{"file": sname, "metric": smetric, "rows_seen": sseen, "rows_new": sfresh, "at": sat}
+	}
+	// Staleness verdict: the per-metric last_date values are present and
+	// correct, but a model trusting "complete coverage" answers week
+	// questions from an empty window. Data ending yesterday is normal
+	// (today is still being written); anything older is stale, said
+	// outright with the newest sample date beside it.
+	today, _ := ownerToday(cfg)
+	newest := ""
+	for _, v := range metrics {
+		if last, _ := v.(map[string]any)["last_date"].(string); last > newest {
+			newest = last
+		}
+	}
+	stale := false
+	daysSince := -1
+	if newest != "" && today != "" {
+		if d, err := daysBetween(newest, today); err == nil {
+			daysSince = d
+			stale = d > 1
+		}
+	}
 	return map[string]any{
 		"metrics":               metrics,
 		"missing":               missing,
 		"unapplied_tombstones":  unapplied,
 		"last_import":           lastImport,
+		"last_sample_import":    lastSample,
+		"newest_sample_date":    newest,
+		"days_since_newest":     daysSince,
+		"stale":                 stale,
 		"metrics_present_count": present,
 	}
+}
+
+// daysBetween counts whole days from date a to date b (YYYY-MM-DD).
+func daysBetween(a, b string) (int, error) {
+	ta, err := time.Parse("2006-01-02", a)
+	if err != nil {
+		return 0, err
+	}
+	tb, err := time.Parse("2006-01-02", b)
+	if err != nil {
+		return 0, err
+	}
+	return int(tb.Sub(ta).Hours() / 24), nil
 }
 
 // Days rolls up steps, active energy, resting heart rate, and HRV per day.
@@ -277,24 +334,28 @@ func Sleep(cfg *config.Config, windowNights int) map[string]any {
 	var episodes []*night
 	skipped := 0
 	for rows.Next() {
-		var s, e, label, day string
+		var s, e sql.NullString
+		var label sql.NullString
+		var day sql.NullString
 		if err := rows.Scan(&s, &e, &label, &day); err != nil {
 			return map[string]any{"error": err.Error()}
 		}
-		start, err := time.Parse(time.RFC3339, s)
-		if err != nil {
+		start, err := time.Parse(time.RFC3339, s.String)
+		if err != nil || !s.Valid {
 			skipped++
 			continue
 		}
 		end := start
-		if parsed, err := time.Parse(time.RFC3339, e); err == nil && parsed.After(start) {
+		if parsed, err := time.Parse(time.RFC3339, e.String); e.Valid && err == nil && parsed.After(start) {
 			end = parsed
 		}
-		if label == "" {
-			label = "unknown"
+		stage := label.String
+		if stage == "" {
+			stage = "unknown"
 		}
-		if day == "" {
-			day = start.Format("2006-01-02")
+		nightDate := day.String
+		if nightDate == "" {
+			nightDate = start.Format("2006-01-02")
 		}
 		// Attach to the latest open episode, including overlapping or
 		// duplicate segments (never a second night for the same sleep).
@@ -304,7 +365,7 @@ func Sleep(cfg *config.Config, windowNights int) map[string]any {
 		if len(episodes) > 0 {
 			nt := episodes[len(episodes)-1]
 			if !start.After(nt.last.Add(3 * time.Hour)) {
-				nt.stages[label] += end.Sub(start).Minutes()
+				nt.stages[stage] += end.Sub(start).Minutes()
 				if end.After(nt.wake) {
 					nt.wake = end
 				}
@@ -316,8 +377,8 @@ func Sleep(cfg *config.Config, windowNights int) map[string]any {
 		}
 		if !attached {
 			episodes = append(episodes, &night{
-				date: day, onset: start, wake: end,
-				stages: map[string]float64{label: end.Sub(start).Minutes()},
+				date: nightDate, onset: start, wake: end,
+				stages: map[string]float64{stage: end.Sub(start).Minutes()},
 				last:   end,
 			})
 		}
@@ -344,6 +405,15 @@ func Sleep(cfg *config.Config, windowNights int) map[string]any {
 		res = []map[string]any{}
 	}
 	return map[string]any{"nights": res, "window_nights": windowNights, "skipped_segments": skipped}
+}
+
+// nullString renders a nullable text column: NULL stays nil in JSON
+// rather than collapsing to "".
+func nullString(ns sql.NullString) any {
+	if !ns.Valid {
+		return nil
+	}
+	return ns.String
 }
 
 // Effort sums minutes at or above a heart-rate floor per day. A day with
@@ -380,19 +450,23 @@ func Effort(cfg *config.Config, n, floor int) map[string]any {
 		samples := 0
 		skipped := 0
 		for rows.Next() {
-			var s, e string
-			var v float64
+			var s, e sql.NullString
+			var v sql.NullFloat64
 			if err := rows.Scan(&s, &e, &v); err != nil {
 				rows.Close()
 				return map[string]any{"error": "could not read heart-rate samples"}
 			}
-			samples++
-			if v < float64(floor) {
+			if !v.Valid {
+				skipped++
 				continue
 			}
-			start, err1 := time.Parse(time.RFC3339, s)
-			end, err2 := time.Parse(time.RFC3339, e)
-			if err1 != nil || err2 != nil || !end.After(start) {
+			samples++
+			if v.Float64 < float64(floor) {
+				continue
+			}
+			start, err1 := time.Parse(time.RFC3339, s.String)
+			end, err2 := time.Parse(time.RFC3339, e.String)
+			if !s.Valid || !e.Valid || err1 != nil || err2 != nil || !end.After(start) {
 				skipped++
 				continue
 			}
@@ -460,8 +534,13 @@ func Recovery(cfg *config.Config, recent, baseline int) map[string]any {
 	}
 	all := lastNDays(today, baseline)
 	recentDays := all
+	capped := false
 	if recent < len(all) {
 		recentDays = all[len(all)-recent:]
+	} else if recent > len(all) {
+		// A recent window wider than the baseline caps at the baseline:
+		// comparing a window against itself would read as a zero delta.
+		capped = true
 	}
 	compare := func(metrics []string, daily func(*sql.DB, []string, string) (any, string)) map[string]any {
 		r, rErr, rN := meanOver(metrics, recentDays, daily)
@@ -481,6 +560,9 @@ func Recovery(cfg *config.Config, recent, baseline int) map[string]any {
 		return m
 	}
 	outRecovery := map[string]any{"recent_days": recent, "baseline_days": baseline}
+	if capped {
+		outRecovery["note"] = "recent window capped at the baseline window"
+	}
 	if m := resolved["resting"]; len(m) > 0 {
 		outRecovery["resting_bpm"] = compare(m, minDay)
 	} else {

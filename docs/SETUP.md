@@ -193,3 +193,5 @@ sudo systemctl enable --now agent-health-import.timer
 ```
 
 The timer unit shipped with the rest of `systemd/`; enabling it is the only step the installer leaves to you, because an import schedule is a deployment choice. The Drive pull's own scheduling stays yours and stays separate.
+
+Ownership is exclusive and stays that way: the database at `HEALTH_DB` belongs to this service account, the importer running as it is the sole writer, and the tools open read-only. If a health database already exists under another account, do not point `HEALTH_DB` at it: that would make this account a writer of another account's store. Migrate instead, once, by hand: copy the file into place and give this account ownership, then the extension manipulates only its own copy from there on.

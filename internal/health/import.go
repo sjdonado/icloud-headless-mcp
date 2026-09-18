@@ -23,47 +23,78 @@ type storer interface {
 	QueryRow(query string, args ...any) *sql.Row
 }
 
-// record mirrors one export envelope line. Pointers distinguish absent
-// from zero; value stays raw until splitValue decides its shape.
+// record mirrors one export envelope line. Optional strings are pointers
+// so an absent field stores NULL, never "": empty string asserts "known
+// to be blank" where NULL means absent, and the distinction is load-bearing
+// for WHERE ... IS NULL queries and for re-imports over adopted stores.
 type record struct {
 	UUID          string          `json:"uuid"`
 	Metric        string          `json:"metric"`
-	RecordType    string          `json:"recordType"`
+	RecordType    *string         `json:"recordType"`
 	Start         string          `json:"start"`
-	End           string          `json:"end"`
-	LocalDate     string          `json:"localDate"`
-	Timezone      string          `json:"timezone"`
+	End           *string         `json:"end"`
+	LocalDate     *string         `json:"localDate"`
+	Timezone      *string         `json:"timezone"`
 	Value         json.RawMessage `json:"value"`
-	Unit          string          `json:"unit"`
-	Source        string          `json:"source"`
-	SourceBundle  string          `json:"sourceBundleId"`
-	Device        string          `json:"device"`
+	Unit          *string         `json:"unit"`
+	Source        *string         `json:"source"`
+	SourceBundle  *string         `json:"sourceBundleId"`
+	Device        *string         `json:"device"`
 	WasEntered    any             `json:"wasUserEntered"`
-	RecordedAt    string          `json:"recordedAt"`
+	RecordedAt    *string         `json:"recordedAt"`
 	SchemaVersion any             `json:"schemaVersion"`
 }
 
-// splitValue divides the polymorphic value without flattening it: a JSON
-// number is a quantity amount; a JSON string or object is a category
-// carrying a readable label, with a code when one is present. A null or
-// absent value is unknown, never zero: parsing JSON null as a number
-// succeeds and would silently mint 0-amount samples into every SUM.
-func splitValue(raw json.RawMessage) (num *float64, code *int64, label string, typ string) {
+// splitValue divides the polymorphic value without flattening it. The app
+// emits an object for both kinds, distinguished by a type field, so the
+// branch is on value.type, not on the JSON kind: {"amount":N,"type":
+// "quantity"} stores an amount, {"code":C,"label":L,"type":"category"}
+// stores a code plus its readable label. A bare JSON number stays a
+// quantity as a guard, though the app never emits it. A null or absent
+// value is unknown, never zero: parsing JSON null as a number succeeds
+// and would silently mint 0-amount samples into every SUM. An object whose
+// type is neither quantity nor category, or a quantity with no numeric
+// amount, is an error: storing the row would mint a number that silently
+// vanished, which is exactly what the null-not-zero rule exists to
+// prevent. Failing the file is loud; a mislabeled row is silent.
+func splitValue(raw json.RawMessage) (num *float64, code *int64, label string, typ string, err error) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || string(trimmed) == "null" {
-		return nil, nil, "", "unknown"
+		return nil, nil, "", "unknown", nil
 	}
 	var f float64
 	if err := json.Unmarshal(raw, &f); err == nil {
-		return &f, nil, "", "quantity"
+		return &f, nil, "", "quantity", nil
 	}
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
-		return nil, nil, strings.TrimSpace(s), "category"
+		return nil, nil, strings.TrimSpace(s), "category", nil
 	}
 	var obj map[string]any
 	if err := json.Unmarshal(raw, &obj); err != nil {
-		return nil, nil, strings.TrimSpace(string(raw)), "unknown"
+		return nil, nil, strings.TrimSpace(string(raw)), "unknown", nil
+	}
+	t, _ := obj["type"].(string)
+	if t == "quantity" {
+		amt, ok := obj["amount"].(float64)
+		if !ok {
+			return nil, nil, "", "", fmt.Errorf("quantity value without a numeric amount")
+		}
+		return &amt, nil, "", "quantity", nil
+	}
+	// A workout has no single number, so the faithful store is the raw
+	// object under a workout type: strictly better than the old
+	// importer's three NULLs, and distinct from the quantity bug (where a
+	// number existed and was discarded).
+	if t == "workout" {
+		compact, err := json.Marshal(obj)
+		if err != nil {
+			return nil, nil, "", "", fmt.Errorf("workout value not re-encodable: %v", err)
+		}
+		return nil, nil, string(compact), "workout", nil
+	}
+	if t != "category" {
+		return nil, nil, "", "", fmt.Errorf("unknown value type %q", t)
 	}
 	if v, ok := obj["code"]; ok {
 		switch n := v.(type) {
@@ -87,7 +118,7 @@ func splitValue(raw json.RawMessage) (num *float64, code *int64, label string, t
 			label = string(compact)
 		}
 	}
-	return nil, code, label, "category"
+	return nil, code, label, "category", nil
 }
 
 func asBool(v any) bool {
@@ -120,16 +151,22 @@ func asInt(v any) any {
 	return nil
 }
 
-// FileResult is one imported file's ledger row.
+// FileResult is one imported file's ledger row. New counts inserts;
+// Updated counts existing rows whose parsed content differed and was
+// rewritten. Identical re-imports report zeros for both, so "0 new"
+// always means "changed nothing" again.
 type FileResult struct {
-	File   string
-	Metric string
-	Seen   int
-	New    int
+	File    string
+	Metric  string
+	Seen    int
+	New     int
+	Updated int
 }
 
-// ImportDir imports every monthly file under root/raw/<metric>/ plus
+// ImportDir imports every monthly file under root/<metric>/ plus
 // root/_tombstones/, in sorted order, recording one ledger row per file.
+// That is the layout the app writes: metric directories sit at the top
+// level with _tombstones as their sibling; there is no raw/ level.
 // Months copy individually and in any order: tombstones apply on arrival
 // in both directions, so import order cannot strand a deletion.
 func ImportDir(db *sql.DB, root string, now time.Time) ([]FileResult, error) {
@@ -140,22 +177,28 @@ func ImportDir(db *sql.DB, root string, now time.Time) ([]FileResult, error) {
 		path, metric string
 		tomb         bool
 	}
-	raw := filepath.Join(root, "raw")
-	rawExists := false
-	entries, err := os.ReadDir(raw)
-	if err != nil && !os.IsNotExist(err) {
+	var top []string
+	var loose []string
+	entries, err := os.ReadDir(root)
+	if err != nil {
 		return nil, err
-	}
-	if err == nil {
-		rawExists = true
 	}
 	for _, e := range entries {
 		if !e.IsDir() {
+			if strings.HasSuffix(e.Name(), ".jsonl") {
+				loose = append(loose, e.Name())
+			}
 			continue
 		}
-		month, err := os.ReadDir(filepath.Join(raw, e.Name()))
+		top = append(top, e.Name())
+		month, err := os.ReadDir(filepath.Join(root, e.Name()))
 		if err != nil {
 			return nil, err
+		}
+		tomb := e.Name() == "_tombstones"
+		metric := ""
+		if !tomb {
+			metric = e.Name()
 		}
 		for _, m := range month {
 			if m.IsDir() || !strings.HasSuffix(m.Name(), ".jsonl") {
@@ -164,25 +207,35 @@ func ImportDir(db *sql.DB, root string, now time.Time) ([]FileResult, error) {
 			files = append(files, struct {
 				path, metric string
 				tomb         bool
-			}{filepath.Join(raw, e.Name(), m.Name()), e.Name(), false})
+			}{filepath.Join(root, e.Name(), m.Name()), metric, tomb})
 		}
 	}
-	tombs, err := os.ReadDir(filepath.Join(root, "_tombstones"))
-	if err != nil && !os.IsNotExist(err) {
-		return nil, err
-	}
-	tombsExist := err == nil
-	if !rawExists && !tombsExist {
-		return nil, fmt.Errorf("export dir %s holds neither raw/ nor _tombstones/", root)
-	}
-	for _, m := range tombs {
-		if m.IsDir() || !strings.HasSuffix(m.Name(), ".jsonl") {
-			continue
+	// Loud mismatch, never a silent success: directories exist but zero
+	// sample files were read, so this root is some other shape (a raw/
+	// level, a bare folder, a typo'd path). Reporting "0 new" here once
+	// applied deletions while ingesting nothing, so this fails and names
+	// what it found. Two quiet cases: an empty root (nothing staged yet),
+	// and a tombstones-only root, which is the legitimate early-arrival
+	// staging the tombstone spec scenario requires.
+	samples := 0
+	for _, f := range files {
+		if !f.tomb {
+			samples++
 		}
-		files = append(files, struct {
-			path, metric string
-			tomb         bool
-		}{filepath.Join(root, "_tombstones", m.Name()), "", true})
+	}
+	if samples == 0 && len(top) > 0 && !(len(top) == 1 && top[0] == "_tombstones") {
+		known := []string{}
+		for _, name := range top {
+			if name != "_tombstones" {
+				known = append(known, name)
+			}
+		}
+		return nil, fmt.Errorf("export dir %s holds %s but no <metric>/YYYY-MM.jsonl sample files: want metric directories beside _tombstones/",
+			root, strings.Join(known, ", "))
+	}
+	if len(loose) > 0 {
+		return nil, fmt.Errorf("export dir %s holds loose monthly files (%s): move them under a <metric>/ directory",
+			root, strings.Join(loose, ", "))
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].path < files[j].path })
 	var out []FileResult
@@ -195,7 +248,7 @@ func ImportDir(db *sql.DB, root string, now time.Time) ([]FileResult, error) {
 		if err != nil {
 			return out, err
 		}
-		seen, fresh, ferr := importFile(tx, f.path, f.metric, f.tomb)
+		seen, fresh, refreshed, ferr := importFile(tx, f.path, f.metric, f.tomb)
 		if ferr != nil {
 			_ = tx.Rollback()
 			return out, fmt.Errorf("%s: %w", f.path, ferr)
@@ -209,15 +262,15 @@ func ImportDir(db *sql.DB, root string, now time.Time) ([]FileResult, error) {
 		if err := tx.Commit(); err != nil {
 			return out, err
 		}
-		out = append(out, FileResult{File: rel, Metric: f.metric, Seen: seen, New: fresh})
+		out = append(out, FileResult{File: rel, Metric: f.metric, Seen: seen, New: fresh, Updated: refreshed})
 	}
 	return out, nil
 }
 
-func importFile(db storer, path, metric string, tombstones bool) (seen, fresh int, err error) {
+func importFile(db storer, path, metric string, tombstones bool) (seen, fresh, refreshed int, err error) {
 	fh, err := os.Open(path)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	defer fh.Close()
 	scan := bufio.NewScanner(fh)
@@ -228,25 +281,26 @@ func importFile(db storer, path, metric string, tombstones bool) (seen, fresh in
 			continue
 		}
 		seen++
-		n, err := importLine(db, line, metric, tombstones)
+		n, u, err := importLine(db, line, metric, tombstones)
 		if err != nil {
-			return seen, fresh, fmt.Errorf("line %d: %w", seen, err)
+			return seen, fresh, refreshed, fmt.Errorf("line %d: %w", seen, err)
 		}
 		fresh += n
+		refreshed += u
 	}
-	return seen, fresh, scan.Err()
+	return seen, fresh, refreshed, scan.Err()
 }
 
-func importLine(db storer, line []byte, metric string, tombstones bool) (int, error) {
+func importLine(db storer, line []byte, metric string, tombstones bool) (fresh, refreshed int, err error) {
 	if tombstones {
 		return importTombstone(db, line)
 	}
 	var r record
 	if err := json.Unmarshal(line, &r); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if r.UUID == "" || r.Start == "" {
-		return 0, fmt.Errorf("record without uuid or start")
+		return 0, 0, fmt.Errorf("record without uuid or start")
 	}
 	if r.Metric == "" {
 		r.Metric = metric
@@ -255,64 +309,92 @@ func importLine(db storer, line []byte, metric string, tombstones bool) (int, er
 	// re-imports at zero new rows with identical counts, whichever side
 	// arrived first.
 	if gone, err := tombstoned(db, r.UUID); err != nil {
-		return 0, err
+		return 0, 0, err
 	} else if gone {
-		return 0, nil
+		return 0, 0, nil
 	}
-	num, code, label, typ := splitValue(r.Value)
-	var res sql.Result
-	var err error
-	res, err = db.Exec(`INSERT OR IGNORE INTO samples(uuid, metric, record_type, start_at, end_at, local_date, timezone, value_num, value_code, value_label, value_type, unit, source, source_bundle, device, user_entered, recorded_at, schema_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		r.UUID, r.Metric, r.RecordType, r.Start, r.End, r.LocalDate, r.Timezone,
-		num, code, label, typ, r.Unit, r.Source, r.SourceBundle, r.Device,
-		boolInt(asBool(r.WasEntered)), r.RecordedAt, asInt(r.SchemaVersion))
+	num, code, label, typ, err := splitValue(r.Value)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
+	}
+	// Absent label is NULL, not "": quantities carry no label, and an
+	// empty string would assert "known to be blank" where NULL means
+	// absent (and would rewrite adopted NULL rows for no gain).
+	var labelArg any
+	if label != "" {
+		labelArg = label
+	}
+	entered := boolInt(asBool(r.WasEntered))
+	schema := asInt(r.SchemaVersion)
+	res, err := db.Exec(`INSERT OR IGNORE INTO samples(uuid, metric, record_type, start_at, end_at, local_date, timezone, value_num, value_code, value_label, value_type, unit, source, source_bundle, device, user_entered, recorded_at, schema_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		r.UUID, r.Metric, r.RecordType, r.Start, r.End, r.LocalDate, r.Timezone,
+		num, code, labelArg, typ, r.Unit, r.Source, r.SourceBundle, r.Device,
+		entered, r.RecordedAt, schema)
+	if err != nil {
+		return 0, 0, err
 	}
 	affected, err := res.RowsAffected()
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	if affected == 0 {
-		_, err = db.Exec(`UPDATE samples SET metric=?, record_type=?, start_at=?, end_at=?, local_date=?, timezone=?, value_num=?, value_code=?, value_label=?, value_type=?, unit=?, source=?, source_bundle=?, device=?, user_entered=?, recorded_at=?, schema_version=? WHERE uuid=?`,
-			r.Metric, r.RecordType, r.Start, r.End, r.LocalDate, r.Timezone,
-			num, code, label, typ, r.Unit, r.Source, r.SourceBundle, r.Device,
-			boolInt(asBool(r.WasEntered)), r.RecordedAt, asInt(r.SchemaVersion), r.UUID)
-		if err != nil {
-			return 0, err
+	if affected == 1 {
+		if err := applyPendingTombstone(db, r.UUID); err != nil {
+			return 1, 0, err
 		}
-		return 0, applyPendingTombstone(db, r.UUID)
+		return 1, 0, nil
 	}
-	if err := applyPendingTombstone(db, r.UUID); err != nil {
-		return 1, err
+	// The row exists: refresh it only when the parsed content differs,
+	// and say so. An unconditional rewrite here once overwrote good rows
+	// with a broken parse while reporting 0 new, so identical content
+	// writes nothing and any rewrite is counted as updated, never new.
+	res, err = db.Exec(`UPDATE samples SET metric=?, record_type=?, start_at=?, end_at=?, local_date=?, timezone=?, value_num=?, value_code=?, value_label=?, value_type=?, unit=?, source=?, source_bundle=?, device=?, user_entered=?, recorded_at=?, schema_version=? WHERE uuid=? AND NOT (metric IS ? AND record_type IS ? AND start_at IS ? AND end_at IS ? AND local_date IS ? AND timezone IS ? AND value_num IS ? AND value_code IS ? AND value_label IS ? AND value_type IS ? AND unit IS ? AND source IS ? AND source_bundle IS ? AND device IS ? AND user_entered IS ? AND recorded_at IS ? AND schema_version IS ?)`,
+		r.Metric, r.RecordType, r.Start, r.End, r.LocalDate, r.Timezone,
+		num, code, labelArg, typ, r.Unit, r.Source, r.SourceBundle, r.Device,
+		entered, r.RecordedAt, schema, r.UUID,
+		r.Metric, r.RecordType, r.Start, r.End, r.LocalDate, r.Timezone,
+		num, code, labelArg, typ, r.Unit, r.Source, r.SourceBundle, r.Device,
+		entered, r.RecordedAt, schema)
+	if err != nil {
+		return 0, 0, err
 	}
-	return 1, nil
+	changed, err := res.RowsAffected()
+	if err != nil {
+		return 0, 0, err
+	}
+	if changed == 0 {
+		return 0, 0, nil
+	}
+	return 0, 1, applyPendingTombstone(db, r.UUID)
 }
 
-func importTombstone(db storer, line []byte) (int, error) {
+func importTombstone(db storer, line []byte) (int, int, error) {
 	var t struct {
 		UUID       string `json:"uuid"`
 		RecordedAt string `json:"recordedAt"`
 	}
 	if err := json.Unmarshal(line, &t); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	if t.UUID == "" {
-		return 0, fmt.Errorf("tombstone without uuid")
+		return 0, 0, fmt.Errorf("tombstone without uuid")
 	}
 	if _, err := db.Exec(`INSERT OR IGNORE INTO tombstones(uuid, recorded_at, applied) VALUES(?,?,0)`,
 		t.UUID, t.RecordedAt); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	res, err := db.Exec(`DELETE FROM samples WHERE uuid=?`, t.UUID)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	if n, _ := res.RowsAffected(); n > 0 {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, 0, err
+	}
+	if n > 0 {
 		_, err = db.Exec(`UPDATE tombstones SET applied=1 WHERE uuid=?`, t.UUID)
-		return 0, err
+		return 0, 0, err
 	}
-	return 0, nil
+	return 0, 0, nil
 }
 
 // tombstoned reports whether a tombstone row names this uuid, marking it
@@ -359,8 +441,4 @@ func boolInt(b bool) int {
 		return 1
 	}
 	return 0
-}
-
-func bytesTrimSpace(b []byte) []byte {
-	return []byte(strings.TrimSpace(string(b)))
 }

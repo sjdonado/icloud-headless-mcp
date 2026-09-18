@@ -14,8 +14,7 @@ The system SHALL expose `health_status`, `health_days(days=14)`, `health_sleep(n
 
 ### Requirement: Status names coverage, freshness, and blind spots
 
-`health_status` SHALL report which metrics are present, how recent each is, and which expected metrics are missing, naming the blind spots explicitly rather than implying completeness.
-
+`health_status` SHALL report which metrics are present, how recent each is, and which expected rollup inputs lack backing data, naming the blind spots explicitly rather than implying completeness. Missing entries SHALL name the rollup input (not a metric: no stored name exists for data never imported) with its reason and the folder substrings resolution tried.
 #### Scenario: Metric never imported
 - **WHEN** status runs with no HRV samples ever imported
 - **THEN** HRV appears as missing with its reason, not as zero or as absent from the answer
@@ -79,3 +78,19 @@ With no database configured, every health tool SHALL report unconfigured (follow
 #### Scenario: Extension never configured
 - **WHEN** any health tool runs with no database path set
 - **THEN** it answers unconfigured with what to set, and the tool stays registered
+
+### Requirement: Status carries a staleness verdict
+
+`health_status` SHALL report the newest sample date, the days since it, and an explicit stale verdict alongside the per-metric dates. Data ending yesterday is normal (today is still being written); anything older is stale, said outright. Complete coverage over stale data MUST NOT read as fresh.
+
+#### Scenario: Week-old data with full coverage
+- **WHEN** status runs with every metric present but the newest sample seven days old
+- **THEN** it reports `stale: true` with the newest sample date and days-since count beside the per-metric dates
+
+### Requirement: Newest sample import reported distinctly
+
+`health_status` SHALL report the newest sample-file import separately from the newest file of any kind, so a tombstones-only run never reads as fresh sample data.
+
+#### Scenario: Tombstone file imports last
+- **WHEN** the newest ledger row is a tombstone file
+- **THEN** `last_import` names it literally while `last_sample_import` still names the newest sample file

@@ -10,7 +10,7 @@ func TestSelfTest(t *testing.T) {
 	if !ok {
 		t.Fatalf("self-test failed: %s", report)
 	}
-	for _, want := range []string{"ok envelope-quantity", "ok envelope-category", "ok unknown-metric", "ok early-tombstone", "ok reimport-zero-new", "ok day-rollup"} {
+	for _, want := range []string{"ok envelope-quantity", "ok envelope-category", "ok unknown-metric", "ok early-tombstone", "ok reimport-zero-new", "ok reimport-keeps-values", "ok day-rollup"} {
 		if !strings.Contains(report, want) {
 			t.Fatalf("report missing %q: %s", want, report)
 		}
