@@ -39,6 +39,32 @@ sudo -u agent-icloud -H /opt/agent-icloud/bin/icloud-mcp session-check
 
 Then one tool per surface: `list_calendars`, `list_mail`, `reminder_lists`, `notes_folders`, `drive_status`. `session-check` exit codes: 0 healthy, 1 signed out, 2 no browser, 3 needs device approval.
 
+## Happy path
+
+Proven 2026-09-18 in the verify container (warm session, outside quiet hours) with a stdlib-only dummy agent that spawns the server exactly like Hermes does (child process, stdio pipes, 330s per-call budget) and runs `initialize`, `tools/list`, then the five calls above with `{}`. Reproduce it after any transport or registry change. This runs in the Linux container, not via production sudo: `ICLOUD_CDP` defaults to `http://127.0.0.1:9222`, and the state paths plus secrets file below are the container's own.
+
+Gate first: `session-check` must print `OK`, and the hour in `AGENT_TZ` must sit outside 23:00 through 06:59. Inside that window a call needing a fresh app-page load refuses by design (quiet hours); already-loaded tabs plus `list_calendars`, `list_mail`, and `drive_status` still answer. A refusal is not a failure, but it is not a green happy path either.
+
+```
+CONTAINER=<name from `docker ps`>
+ARCH=$(docker version --format '{{.Server.Arch}}')  # amd64 or arm64, matching GOARCH names
+GOOS=linux GOARCH=$ARCH go build -ldflags "-X main.version=$(git rev-parse --short HEAD)" -o /tmp/icloud-mcp-happy ./cmd/icloud-mcp
+docker cp /tmp/icloud-mcp-happy "$CONTAINER:/tmp/icloud-mcp-happy"
+docker exec "$CONTAINER" bash -c 'set -a && . /secrets/icloud.env && set +a && export ICLOUD_STATE=<state> ICLOUD_SHARED_STATE=<shared> && /tmp/icloud-mcp-happy session-check'
+```
+
+`<state>`/`<shared>` are the container's state dirs (the ones the resident browser started with); `/secrets/icloud.env` supplies the account env (`ICLOUD_APPLE_ID`, `ICLOUD_APP_PASSWORD`, `AGENT_TZ`, ...). Source it only inside the container, opaquely: never print it, never copy it out.
+
+Then run the dummy agent the same way in the background and poll its log. Any MCP stdio client works: send `initialize`, `notifications/initialized`, `tools/list`, then `tools/call` for each of the five with `{}`. Write it locally first (stdlib only; that sequence is the whole spec), then:
+
+```
+docker cp /tmp/hermes_dummy.py "$CONTAINER:/tmp/hermes_dummy.py"
+docker exec "$CONTAINER" bash -c 'set -a && . /secrets/icloud.env && set +a && export ICLOUD_STATE=<state> ICLOUD_SHARED_STATE=<shared> && nohup python3 /tmp/hermes_dummy.py > /tmp/happy.log 2>&1 & echo started'
+sleep 150; docker exec "$CONTAINER" cat /tmp/happy.log
+```
+
+Expect 7/7: server name `icloud-headless-mcp`, 23 tools, and all five calls answering. Parse each `result.content[0].text` as JSON and require no `error` and no `needs_device_approval` key. Keys seen: `list_calendars` carries `calendars`; `list_mail` carries `mailbox`, `count`, `matched`; `reminder_lists` carries `count`, `lists`; `notes_folders` carries `count`, `folders`; `drive_status` carries `last_pull`, `stale`, `schedule`, `files_tracked`, `libraries` (`stale: null` means never pulled, `{}` libraries is healthy-empty). Browser-backed calls take 60-90s each.
+
 ## Change guidance
 
 - DAV/IMAP (`internal/dav`, `internal/mail`): needs credentials only, no browser lock. After a change, re-test concurrency: `list_mail` while a Notes call holds its lock.
@@ -50,7 +76,7 @@ Then one tool per surface: `list_calendars`, `list_mail`, `reminder_lists`, `not
 Full list in `docs/ARCHITECTURE.md` Pitfalls; the load-bearing subset:
 
 - Chromium must run headed on a virtual display; headless reports a different user agent and kills the session server-side.
-- Fresh app-page loads refuse 23:00-07:00 local (quiet hours); already-loaded tabs still work.
+- Fresh app-page loads refuse 23:00 through 06:59 owner-local (quiet hours); already-loaded tabs still work.
 - CalDAV Reminders store is dead (writes succeed, invisible everywhere). Reminders stay browser-backed; never restore them on CalDAV.
 - Calendar listings need `expand=True`; convert ISO offsets into the named `AGENT_TZ` zone before writing (fixed offsets serialize as wrong UTC hours).
 - IMAP: check the select result (missing mailbox leaves AUTH state); flags come from separate `UID SEARCH`; server-side search is not substring search, `search_mail` unions server plus local decoded pass.

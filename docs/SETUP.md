@@ -143,7 +143,7 @@ sudo -n -u agent-icloud /opt/agent-icloud/bin/stdio.sh </dev/null
 
 Then configure your agent runtime to spawn `stdio.sh`, with a timeout above 300 seconds, and call one tool per surface: `list_calendars`, `list_mail`, `reminder_lists`, `notes_folders` and `drive_status`. All five should answer. Anything less than all five is a setup that is not finished, and it is much cheaper to find that now than the first time you need it.
 
-Between 23:00 and 07:00 local, a browser-backed call that would need a fresh app page load refuses instead of raising a prompt on your devices at night. An already-open tab still works. That is the quiet-hours rule doing its job, not a failure.
+Between 23:00 through 06:59 owner-local (`AGENT_TZ`), a browser-backed call that would need a fresh app page load refuses instead of raising a prompt on your devices at night. An already-open tab still works. That is the quiet-hours rule doing its job, not a failure.
 
 ## 9. When the grant lapses later
 
@@ -159,4 +159,4 @@ Restarting the browser is a decision, never a side effect. Reloading unit files,
 
 ## 10. Configure your agent runtime (Hermes or any MCP client) to spawn `stdio.sh`
 
-That is the last step, and it is the only one this document cannot write for you. This server is a child process of the runtime that drives it, on this same machine, so what remains is telling that runtime to spawn `sudo -n -u <service account> /opt/agent-icloud/bin/stdio.sh` with a timeout above 300 seconds. Where that is written down, and what the entry is called, belongs to the runtime's own configuration and its own documentation. Give the entry a name that is a valid identifier such as `icloud-headless-mcp`: a runtime that prefixes tool names with it needs one. In Hermes this is a stdio MCP server entry with that command and timeout; the same entry reproduces on any other host.
+That is the last step, and it is the only one this document cannot write for you. This server is a child process of the runtime that drives it, on this same machine, so what remains is telling that runtime to spawn `sudo -n -u <service account> /opt/agent-icloud/bin/stdio.sh` with a timeout above 300 seconds. Give the entry a name that is a valid identifier such as `icloud-headless-mcp`: a runtime that prefixes tool names with it needs one. Copy-paste entries for Hermes and OpenCode are in the README's `Connect a client` section; the same entry pattern on another host with its own install works the same way.
