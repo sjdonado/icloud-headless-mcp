@@ -35,6 +35,7 @@ import (
 	"github.com/sjdonado/icloud-headless-mcp/internal/mcpserver"
 	"github.com/sjdonado/icloud-headless-mcp/internal/notes"
 	"github.com/sjdonado/icloud-headless-mcp/internal/reminders"
+	"github.com/sjdonado/icloud-headless-mcp/internal/session"
 )
 
 // version is stamped at release time: go build -ldflags "-X main.version=vX.Y.Z".
@@ -119,6 +120,9 @@ func runServe() {
 		handlers[name] = h
 	}
 	for name, h := range reminders.Handlers(cfg, ask) {
+		handlers[name] = h
+	}
+	for name, h := range session.Handlers(cfg, ask) {
 		handlers[name] = h
 	}
 	srv = mcpserver.NewWithHandlers(handlers)

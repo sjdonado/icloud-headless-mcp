@@ -42,7 +42,7 @@ The full first-run sequence, including the two-factor login and Apple's Advanced
 
 ## Tools
 
-23 of them, on one server entry, so a Notes tool is `<prefix>_create_note` rather than living behind a second server. `list_calendars` first when the question is about the calendar, `drive_status` first when data pulled off Drive looks short.
+25 of them, on one server entry, so a Notes tool is `<prefix>_create_note` rather than living behind a second server. `list_calendars` first when the question is about the calendar, `drive_status` first when data pulled off Drive looks short.
 
 | Surface   | Tools                                                       | Tier                                                                                                                               | Asks?               |
 | --------- | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------------------- |
@@ -59,6 +59,8 @@ The full first-run sequence, including the two-factor login and Apple's Advanced
 | Reminders | `reminder_lists`, `list_reminders`, `completed_reminders`   | read only, the first two on the browser and the third out of Apple's own records                                                   | No                  |
 | Reminders | `complete_reminder`, `create_reminder`                      | silent, on the browser, and each verifies its write against what the app shows                                                     | No                  |
 | Drive     | `drive_status`                                              | read only. Status, never the pull                                                                                                  | No                  |
+| Recovery  | `reask_access`                                              | confirmed, through MCP elicitation. Re-fires Apple's data-access prompt; refuses unless iCloud is actually waiting, and never at night | Yes                 |
+| Recovery  | `open_login`                                                | confirmed, through MCP elicitation. Opens the supervised VNC login door: a link plus a one-time password, processes exit after 20 minutes | Yes                 |
 
 There is no mail delete or move tool, no note edit or delete, and no tool that can trigger the Drive pull.
 
@@ -66,9 +68,11 @@ There is no mail delete or move tool, no note edit or delete, and no tool that c
 
 **The tiering lives in this code, not in the client's configuration.** It is this server that decides a delete asks while creating an event solo does not. The client only renders the question.
 
+**Recovery is two tools with two different jobs, and the errors route between them.** A lapsed grant carries `needs_device_approval` and is fixed by `reask_access`, which re-fires the prompt onto your devices. An expired session carries `needs_login` and is fixed by `open_login`, which opens the VNC door and hands back a link plus a one-time password: a Tailscale link when the host is on a tailnet, a loopback link otherwise. Use them the way the failure happens. In a conversation, call `reask_access` now and tell the owner to approve; the prompt arrives within seconds. In a background run, do not call it: report that access lapsed and timed out, and reload only when the owner replies asking to try again. Same for the door: open it when the owner is there to click through, never speculatively.
+
 ## How it works
 
-One process serves all 23 tools. Notes and Reminders each hold their own per-app lock on the shared resident browser, while calendar, contacts and mail take no lock at all, so a Notes call never serialises a mail read behind it.
+One process serves all 25 tools. Notes and Reminders each hold their own per-app lock on the shared resident browser, while calendar, contacts and mail take no lock at all, so a Notes call never serialises a mail read behind it.
 
 The resident Chromium holds the iCloud session in memory and loads only `icloud.com` at startup, so a restart by itself costs nothing: no prompt is raised until the next app-page load, which is what asks Apple for the data-access grant. That is why the resident opens no app tab on its own, and why restarting the browser is a decision rather than a side effect. A fresh app-page load is refused from 23:00 through 06:59 owner-local so no prompt ever wakes the owner at night; already-loaded tabs keep working.
 

@@ -38,6 +38,14 @@ If you front noVNC with anything, front it with something that terminates on the
 
 Never commit a VNC password file. `*.vncpass` is ignored for that reason.
 
+## A tool can open the login door
+
+`open_login` starts the same door as the units above, supervised instead of by hand: one loopback x11vnc plus one loopback websockify, a one-time password with a 20-minute TTL, and a record under the service account's state directory. This changes the threat model in exactly one way: whoever can get the agent to call the tool and read the result holds the link and the password until the door closes itself.
+
+Four things bound that. The tool asks first through the same elicitation gate as a delete, so a session that cannot ask opens nothing. It opens only for a gone session, never to bypass an approval wait, and never without a browser answering. The password is issued once, never stored in cleartext, and shredded with the door; the processes exit at TTL even with no further traffic, the record is swept on the next session-tool entry, and healthy browser calls sweep it earlier once the login is observed. And the link is only as far-reaching as the bind address: the tailnet address with Tailscale, loopback without, never a wildcard or a public interface either way.
+
+Do not weaken any of the four: no standing door, no passwordless door, no door for a merely latched session, no approval-free door. A scheduled run opening login doors is the shape of the abuse, and the tool refuses exactly that shape when nobody can answer the ask.
+
 ## The sudoers grants are single-binary on purpose
 
 Two rules ship here, and both name one exact command with no argument that can vary.

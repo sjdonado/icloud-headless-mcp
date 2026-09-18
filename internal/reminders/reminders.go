@@ -29,6 +29,7 @@ import (
 	"github.com/sjdonado/icloud-headless-mcp/internal/config"
 	"github.com/sjdonado/icloud-headless-mcp/internal/mcpserver"
 	"github.com/sjdonado/icloud-headless-mcp/internal/queue"
+	"github.com/sjdonado/icloud-headless-mcp/internal/session"
 )
 
 const (
@@ -81,13 +82,14 @@ func (c *Client) withApp(ctx context.Context, fn func(tab *browser.Tab) (map[str
 	_ = ctx
 	tab, err := browser.App{Name: appName, URL: appURL, FrameHint: frameHint, ReadyClass: readyKind}.Open(c.state, c.owner, c.now())
 	if err != nil {
-		if _, ok := err.(*browser.NeedsApprovalError); ok {
-			return map[string]any{"error": err.Error(), "needs_device_approval": true}, nil
-		}
-		return map[string]any{"error": shortError(err)}, nil
+		return openError(err), nil
 	}
 	defer tab.Close()
-	return fn(tab)
+	out, outErr := fn(tab)
+	if outErr == nil {
+		session.MaybeReap(c.state)
+	}
+	return out, outErr
 }
 
 func shortError(err error) string {
@@ -96,6 +98,19 @@ func shortError(err error) string {
 		typeName = typeName[i+1:]
 	}
 	return strings.TrimPrefix(typeName, "*") + ": " + err.Error()
+}
+
+// openError maps an app-open failure to the client-routable result: a
+// lapsed grant carries needs_device_approval (reask_access fixes it), an
+// expired session carries needs_login (open_login fixes it).
+func openError(err error) map[string]any {
+	if _, ok := err.(*browser.NeedsApprovalError); ok {
+		return map[string]any{"error": err.Error(), "needs_device_approval": true}
+	}
+	if _, ok := err.(*browser.SignedOutError); ok {
+		return map[string]any{"error": err.Error(), "needs_login": true}
+	}
+	return map[string]any{"error": shortError(err)}
 }
 
 func sleep(ms int) { time.Sleep(time.Duration(ms) * time.Millisecond) }
@@ -1629,6 +1644,9 @@ func runClient(cfg *config.Config, fn func(*Client) (map[string]any, error)) (*m
 	if err != nil {
 		if _, ok := err.(*browser.NeedsApprovalError); ok {
 			return mcpserver.ResultJSON(map[string]any{"error": err.Error(), "needs_device_approval": true})
+		}
+		if _, ok := err.(*browser.SignedOutError); ok {
+			return mcpserver.ResultJSON(map[string]any{"error": err.Error(), "needs_login": true})
 		}
 		return mcp.NewToolResultError(shortError(err)), nil
 	}

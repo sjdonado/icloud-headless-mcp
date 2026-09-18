@@ -1,5 +1,5 @@
 // Package mcpserver builds the shared MCP server: the server identity, the
-// 23-tool registry, and the elicitation approval gate every confirmed tool
+// 25-tool registry, and the elicitation approval gate every confirmed tool
 // asks through.
 package mcpserver
 
@@ -34,7 +34,7 @@ type ToolDef struct {
 	Asks        string
 }
 
-// Tools is the full 23-tool registry in README table order. Names are the
+// Tools is the full 25-tool registry in README table order. Names are the
 // frozen contract (README Tools table, openspec/changes/go-rewrite/specs/),
 // not invented here.
 var Tools = []ToolDef{
@@ -61,6 +61,8 @@ var Tools = []ToolDef{
 	{"complete_reminder", "Tick a reminder off.", TierSilent, "no"},
 	{"create_reminder", "Add a reminder, optionally with a due time.", TierSilent, "no"},
 	{"drive_status", "When the Drive pull last ran and what it holds. Status only.", TierReadOnly, "no"},
+	{"reask_access", "Re-fire Apple's data-access prompt. Asks the owner first.", TierConfirmed, "yes"},
+	{"open_login", "Open the supervised VNC login door. Asks the owner first.", TierConfirmed, "yes"},
 }
 
 // approveSchema carries one optional boolean;

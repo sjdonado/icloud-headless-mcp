@@ -157,6 +157,14 @@ A genuinely expired session is the other failure and it looks different: `icloud
 
 Restarting the browser is a decision, never a side effect. Reloading unit files, moving these files and re-running the wrapper are all free. Restarting the browser or the display is not.
 
+## 9b. Recovering without SSH, through the agent
+
+Section 9 assumes you can reach the host. When the agent runs somewhere you cannot SSH from (a chat client on your phone, a scheduled run), the same two recoveries are tools, and the errors route between them: `needs_device_approval` means the grant lapsed and wants `reask_access`; `needs_login` means the session expired and wants `open_login`.
+
+`reask_access` re-fires the prompt and clears the latch, but only when the latch is actually set, outside quiet hours, and the owner approves the ask. In a conversation, call it now and tell the owner to approve: the prompt lands within seconds. In a background run, do not call it and do not retry in a loop: report that access lapsed and the call timed out waiting, and reload only when the owner replies asking to try again.
+
+`open_login` opens a supervised VNC door for 20 minutes and returns the link plus a one-time password in the tool result. The link uses the tailnet address when the host has Tailscale, and loopback otherwise (then you still need your own tunnel). Open the link, enter the password, sign in with the Apple ID and the two-factor code, tick "Trust this browser", approve the grant when it appears, and tell the agent to retry. The door processes exit at expiry and the record is swept on the next recovery-tool call, or earlier once the login is observed; the password is issued once and never stored in cleartext, so a lost password waits out the remaining minutes. Open the door only when the owner is there to click through, never speculatively and never from a scheduled run: anyone holding the link and the password drives the login screen.
+
 ## 10. Configure your agent runtime (Hermes or any MCP client) to spawn `stdio.sh`
 
 That is the last step, and it is the only one this document cannot write for you. This server is a child process of the runtime that drives it, on this same machine, so what remains is telling that runtime to spawn `sudo -n -u <service account> /opt/agent-icloud/bin/stdio.sh` with a timeout above 300 seconds. Give the entry a name that is a valid identifier such as `icloud-headless-mcp`: a runtime that prefixes tool names with it needs one. Copy-paste entries for Hermes and OpenCode are in the README's `Connect a client` section; the same entry pattern on another host with its own install works the same way.

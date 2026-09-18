@@ -3,6 +3,8 @@ package notes
 import (
 	"strings"
 	"testing"
+
+	"github.com/sjdonado/icloud-headless-mcp/internal/browser"
 )
 
 // The regression vectors, verbatim: the failure modes this converter
@@ -78,5 +80,19 @@ func TestTitleMatches(t *testing.T) {
 	}
 	if titleMatches("Hi", "Hello there friend") {
 		t.Error("under-six-characters must not match")
+	}
+}
+
+func TestApprovalOrErrorRoutesByFailure(t *testing.T) {
+	approval := approvalOrError(&browser.NeedsApprovalError{Msg: "waiting"})
+	if approval["needs_device_approval"] != true {
+		t.Fatalf("lapsed grant should carry needs_device_approval: %v", approval)
+	}
+	login := approvalOrError(&browser.SignedOutError{Msg: "expired"})
+	if login["needs_login"] != true {
+		t.Fatalf("expired session should carry needs_login: %v", login)
+	}
+	if _, ok := login["needs_device_approval"]; ok {
+		t.Fatalf("expired session must not carry needs_device_approval: %v", login)
 	}
 }

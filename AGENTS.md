@@ -63,7 +63,7 @@ docker exec "$CONTAINER" bash -c 'set -a && . /secrets/icloud.env && set +a && e
 sleep 150; docker exec "$CONTAINER" cat /tmp/happy.log
 ```
 
-Expect 7/7: server name `icloud-headless-mcp`, 23 tools, and all five calls answering. Parse each `result.content[0].text` as JSON and require no `error` and no `needs_device_approval` key. Keys seen: `list_calendars` carries `calendars`; `list_mail` carries `mailbox`, `count`, `matched`; `reminder_lists` carries `count`, `lists`; `notes_folders` carries `count`, `folders`; `drive_status` carries `last_pull`, `stale`, `schedule`, `files_tracked`, `libraries` (`stale: null` means never pulled, `{}` libraries is healthy-empty). Browser-backed calls take 60-90s each.
+Expect 10/10: initialize, tools/list (25 tools including the two recovery tools), five surface calls, and the two recovery refusals. Parse each `result.content[0].text` as JSON and require no `error`, no `needs_device_approval`, and no `needs_login` key on the five data calls. Keys seen: `list_calendars` carries `calendars`; `list_mail` carries `mailbox`, `count`, `matched`; `reminder_lists` carries `count`, `lists`; `notes_folders` carries `count`, `folders`; `drive_status` carries `last_pull`, `stale`, `schedule`, `files_tracked`, `libraries` (`stale: null` means never pulled, `{}` libraries is healthy-empty). Then the two recovery refusals, deterministic on a healthy session with a clear latch and no elicitation: `reask_access` answers `reasked: false` naming nothing-to-re-ask, `open_login` answers `door: not-needed`. Browser-backed calls take 60-90s each.
 
 ## Change guidance
 
