@@ -231,6 +231,16 @@ One static binary, `icloud-mcp`, holding the server and every helper as subcomma
 
 Point `HEALTH_EXPORT_DIR` at a staged Apple Health export folder (monthly JSONL per metric plus tombstone files, as the HealthMirror iOS app writes into Drive), and a daily timer imports it into SQLite at `HEALTH_DB` via `icloud-mcp health-import`. The six `health_*` tools then answer coverage, day rollups, sleep stages, effort, recovery, and one guarded read-only SELECT each. Empty means off: the importer no-ops and the tools report unconfigured. The backfill is a file, not a feature: save the official Apple export from agent chat into staging and the next import picks it up. Days are the export's own `localDate`, never a converted zone date; a metric that errored reports null with its reason, never zero. The extension owns its database exclusively: the importer is the sole writer and the tools open read-only, so `HEALTH_DB` must live under this service account. Adopting a database another account built means copying it into place with this account's ownership (a manual migrate by the operator), never pointing at the other account's live store. See `docs/SETUP.md` for the runbook.
 
+## Status
+
+What has actually been run against Apple, and what has not. This section exists so nobody has to guess from the marketing.
+
+- **Reads: verified live.** Every read-only tool has been exercised against a real iCloud account in a container rig: a headed Chromium on a virtual display holding a signed-in session, the single binary spawned over stdio the way a runtime spawns it, one call per surface. That covers `list_calendars`, `list_events`, `search_contacts`, `list_mailboxes`, `list_mail`, `read_mail`, `search_mail`, `notes_folders`, `notes_list`, `notes_read`, `notes_search`, `reminder_lists`, `list_reminders`, `completed_reminders`, `drive_status` and the `health_*` tools, plus the refusal paths: quiet hours, a lapsed grant reporting `needs_device_approval`, an expired session reporting `needs_login`, and the two recovery tools declining when their preconditions are not met.
+- **Writes: implemented, unit-tested, not yet executed against a live account.** `create_event`, `update_event`, `delete_event`, `send_mail`, `create_note`, `update_note`, `create_reminder` and `complete_reminder` pass their test suites, and the approval gate is exercised end to end against a real MCP client, but none of them has been run against Apple by the maintainer. Treat the first live write as the interesting test, and read what the tool says about whether it confirmed the result.
+- **The web apps are a moving target.** Notes and Reminders are driven through the real iCloud web apps, so an Apple redesign can break them without notice. The tools fail loudly rather than returning the wrong thing, which is the property worth preserving when that day comes.
+- **The health importer is verified against real exports** by an operator outside this repository: 1.2 million rows, column-level agreement with a previous importer, idempotent re-imports, and propagating deletions.
+- **Nothing in the test suite talks to Apple.** `go test ./...` is deterministic and offline; the live behaviour above is a manual rig, not CI.
+
 ## Verification
 
 Run it as the account it runs as, and without restarting the browser:
