@@ -335,3 +335,43 @@ func TestLiveDoorVerifiesCmdline(t *testing.T) {
 		t.Fatal("cmdline match should read the door live")
 	}
 }
+
+// TestKillGroupSurvivesExecWindow is the regression for the CI failure: a
+// pid killed immediately after Start sits in its fork-to-exec window,
+// where /proc/PID/cmdline reads empty. Gating on a cmdline match there
+// declined the kill and the sleeper outlived its killer.
+func TestKillGroupSurvivesExecWindow(t *testing.T) {
+	for i := 0; i < 25; i++ {
+		cmd := exec.Command("sleep", "30")
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("iteration %d: start: %v", i, err)
+		}
+		started := time.Now()
+		killGroup(cmd.Process.Pid, "sleep")
+		_ = cmd.Wait()
+		if elapsed := time.Since(started); elapsed > 5*time.Second {
+			t.Fatalf("iteration %d: kill took %v, the sleeper outlived its killer", i, elapsed)
+		}
+	}
+}
+
+// TestKillGroupSparesRecycledPid proves the one case the gate still skips:
+// a living process whose cmdline names a different program.
+func TestKillGroupSparesRecycledPid(t *testing.T) {
+	cmd := exec.Command("sleep", "30")
+	cmd.Args[0] = "innocent-bystander"
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+	}()
+	killGroup(cmd.Process.Pid, "x11vnc")
+	time.Sleep(100 * time.Millisecond)
+	if !procExists(cmd.Process.Pid) {
+		t.Fatal("killGroup killed a process whose cmdline named another program")
+	}
+}
