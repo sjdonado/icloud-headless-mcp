@@ -103,36 +103,89 @@ func validIPv4(s string) bool {
 	return ip != nil && ip.To4() != nil
 }
 
+// procExists reports whether pid names a living process.
+func procExists(pid int) bool {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return proc.Signal(syscall.Signal(0)) == nil
+}
+
+// cmdline reads a process's argv; ok is false when it cannot be read.
+func cmdline(pid int) (string, bool) {
+	raw, err := os.ReadFile(filepath.Join(procFS, strconv.Itoa(pid), "cmdline"))
+	if err != nil {
+		return "", false
+	}
+	return string(raw), true
+}
+
+// procDead reports the zombie and dead process states.
+func procDead(pid int) bool {
+	stat, err := os.ReadFile(filepath.Join(procFS, strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return false
+	}
+	i := strings.LastIndex(string(stat), ")")
+	if i < 0 {
+		return false
+	}
+	state := strings.Fields(string(stat)[i+1:])
+	if len(state) == 0 {
+		return false
+	}
+	switch state[0] {
+	case "Z", "X", "x", "K", "W":
+		return true
+	}
+	return false
+}
+
 // procAlive reports whether pid is a living process running want. Signal 0
 // alone trusts recycled pids and zombies, so on Linux the cmdline must
 // name the expected binary and the state must not be zombie or dead.
 // Anywhere without /proc it degrades to the signal check.
 func procAlive(pid int, want string) bool {
-	proc, err := os.FindProcess(pid)
-	if err != nil {
+	if !procExists(pid) {
 		return false
 	}
-	if err := proc.Signal(syscall.Signal(0)); err != nil {
-		return false
-	}
-	raw, err := os.ReadFile(filepath.Join(procFS, strconv.Itoa(pid), "cmdline"))
-	if err != nil {
+	raw, ok := cmdline(pid)
+	if !ok {
+		// No /proc to read (or no permission): assume alive rather than
+		// reap a door that may well be serving.
 		return true
 	}
-	if !strings.Contains(string(raw), want) {
+	// An empty cmdline is no name at all: a zombie, a kernel thread, or a
+	// process still in the fork-to-exec window. Never a door server.
+	if len(raw) == 0 || !strings.Contains(raw, want) {
 		return false
 	}
-	if stat, err := os.ReadFile(filepath.Join(procFS, strconv.Itoa(pid), "stat")); err == nil {
-		if i := strings.LastIndex(string(stat), ")"); i >= 0 {
-			if state := strings.Fields(string(stat)[i+1:]); len(state) > 0 {
-				switch state[0] {
-				case "Z", "X", "x", "K", "W":
-					return false
-				}
-			}
-		}
+	return !procDead(pid)
+}
+
+// procIsOther reports whether pid is provably a different, living process
+// than the one recorded: it exists and its cmdline is non-empty and does
+// not name want. An empty or unreadable cmdline is NOT proof of a
+// bystander, so this stays false and the caller may proceed. That matters
+// for killGroup, where treating the fork-to-exec window as a mismatch
+// silently declined to kill a door server it had just started.
+func procIsOther(pid int, want string) bool {
+	if !procExists(pid) {
+		return false
 	}
-	return true
+	raw, ok := cmdline(pid)
+	if !ok || len(raw) == 0 {
+		return false
+	}
+	return !strings.Contains(raw, want)
+}
+
+// killOne signals a single process, best-effort.
+func killOne(pid int) {
+	if proc, err := os.FindProcess(pid); err == nil {
+		_ = proc.Kill()
+	}
 }
 
 // liveDoor returns the recorded door when its processes still answer and
@@ -170,28 +223,35 @@ func closeDoor(d *Door) {
 	shred(d.PassFile)
 }
 
-// killGroup kills a process group whose leader runs want. The cmdline
-// check guards recycled pids; the group (not the pid) guarantees wrapper
-// plus guarded server die together. The pgid check guards the reverse: a
-// recycled pid inside somebody else's group must never take that group
-// down, so a non-leader gets a direct kill only. A direct kill follows a
-// group kill that leaves the process standing, which is what doors
-// started before process groups existed need.
+// killGroup kills a process group whose leader is the recorded door
+// process. The group (not the pid) is what guarantees the timeout wrapper
+// and the server it guards die together.
+//
+// The gate is deliberately "kill unless we can prove this is somebody
+// else", not "kill only if the cmdline matches". A pid in its fork-to-exec
+// window has an empty cmdline, and requiring a match there silently
+// declined to kill a door server that had just started, leaving it
+// running until its TTL. Only a non-empty cmdline naming a different
+// program proves a recycled pid, and that is the one case we skip.
+//
+// Two more guards: a pid that is not its own group leader gets a direct
+// kill (there is no group of its own to take down), and our own process
+// group is never signalled, however the record came to name it.
 func killGroup(pid int, want string) {
-	if !procAlive(pid, want) {
+	if pid <= 0 || !procExists(pid) {
 		return
 	}
-	if pgid, err := syscall.Getpgid(pid); err != nil || pgid != pid {
-		if proc, err := os.FindProcess(pid); err == nil {
-			_ = proc.Kill()
-		}
+	if procIsOther(pid, want) {
+		return
+	}
+	ourGroup := syscall.Getpgrp()
+	if pgid, err := syscall.Getpgid(pid); err != nil || pgid != pid || pgid == ourGroup {
+		killOne(pid)
 		return
 	}
 	_ = syscall.Kill(-pid, syscall.SIGKILL)
 	if procAlive(pid, want) {
-		if proc, err := os.FindProcess(pid); err == nil {
-			_ = proc.Kill()
-		}
+		killOne(pid)
 	}
 }
 
