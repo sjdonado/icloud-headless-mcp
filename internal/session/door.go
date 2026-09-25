@@ -1,15 +1,15 @@
-// Login door: supervised VNC access for signing in without SSH.
+// Login door: supervised remote access to the resident browser's login
+// screen, for signing in without SSH.
 //
 // The door opens only for a gone session, never to bypass an approval
-// wait. It is one x11vnc plus one loopback websockify, both wrapped in
-// `timeout` so the processes die at TTL even when no later tool call ever
-// reaps the record. The record (pids, expiry, password file) is swept
+// wait. It is one `icloud-mcp door` process (see ServeDoor) streaming the
+// headless browser over CDP, which exits by itself at TTL even when no
+// later tool call ever reaps the record. The record (pids, expiry, password file) is swept
 // lazily by every session-tool entry, and early once a healthy session is
 // observed, which is what a completed login looks like.
 package session
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -31,11 +31,12 @@ import (
 // wait: Apple 2FA plus typing, with slack, and no more.
 const doorTTL = 20 * time.Minute
 
-const (
-	vncPort   = "5900"
-	novncPort = "6080"
-	novncWeb  = "/usr/share/novnc"
-)
+// doorPort is where the door prefers to listen, on loopback or the tailnet
+// address; pickPort falls back to a free port when something else holds it.
+const doorPort = "6080"
+
+// doorProc is the door process's argv[0], what liveness checks match on.
+const doorProc = "icloud-login-door"
 
 // procFS is where process cmdlines and states are read for liveness
 // checks. A variable so tests can point it at a fixture tree.
@@ -43,13 +44,16 @@ var procFS = "/proc"
 
 // Door is one open login door, as recorded on disk.
 type Door struct {
-	VNCPid   int    `json:"vnc_pid"`
-	NoVNCPid int    `json:"novnc_pid"`
+	Pid      int    `json:"pid"`
 	Expires  int64  `json:"expires_unix"`
 	PassFile string `json:"passfile"`
 	URL      string `json:"url"`
 	Via      string `json:"via"`
 	Created  int64  `json:"created_unix"`
+
+	// exited closes when this process saw the door exit; nil for a door
+	// read back from its record.
+	exited <-chan struct{}
 }
 
 func doorDir(state browser.State) string {
@@ -60,13 +64,13 @@ func doorRecord(state browser.State) string {
 	return filepath.Join(doorDir(state), "door.json")
 }
 
-// tempPassword makes one VNC password. Exactly 8 characters: classic VNC
-// authentication truncates longer passwords silently, so a longer one
-// would be a weaker one wearing a disguise. Rejection sampling, because
-// the alphabet length is not a power of two.
+// tempPassword makes one door password from crypto/rand: 16 characters
+// (about 93 bits) from an alphabet without look-alikes, so it survives
+// being read off a phone. Rejection sampling, because the alphabet length
+// is not a power of two.
 func tempPassword() (string, error) {
 	const alphabet = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-	out := make([]byte, 8)
+	out := make([]byte, 16)
 	for i := range out {
 		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(alphabet))))
 		if err != nil {
@@ -77,25 +81,48 @@ func tempPassword() (string, error) {
 	return string(out), nil
 }
 
-// novncURL builds the door link and the address its listener binds.
+// doorURL builds the door link and the address its listener binds.
 // A Tailscale IPv4 address turns the link into one that works from
 // anywhere on the tailnet (the Telegram-remote case), and the listener
 // binds exactly that address: tailnet members reach it, nothing public
 // does. Anything else, including a tailscale that answers garbage, falls
 // back to loopback, which needs the caller's own tunnel.
-func novncURL() (url, via, bind string) {
+//
+// ICLOUD_DOOR_BIND overrides the bind address for a container, whose own
+// loopback the host cannot reach: bind 0.0.0.0 inside, publish the port
+// on the host's loopback only (docker run -p 127.0.0.1:6080:6080), and
+// the link is the host's loopback. It is ignored outside a container.
+// Under `docker run --network host` the container shares the host's
+// interfaces, so that setup is unsupported (SECURITY.md).
+func doorURL() (url, via, bind string) {
+	if b := os.Getenv("ICLOUD_DOOR_BIND"); b != "" && inContainer() {
+		return "http://127.0.0.1:" + doorPort + "/", "published", b
+	}
 	if path, err := exec.LookPath("tailscale"); err == nil {
 		ctx, stop := context.WithTimeout(context.Background(), 5*time.Second)
 		defer stop()
 		if out, err := exec.CommandContext(ctx, path, "ip", "-4").Output(); err == nil {
 			for _, line := range strings.Split(string(out), "\n") {
 				if ip := strings.TrimSpace(line); validIPv4(ip) {
-					return "http://" + ip + ":" + novncPort + "/vnc.html", "tailscale", ip
+					return "http://" + ip + ":" + doorPort + "/", "tailscale", ip
 				}
 			}
 		}
 	}
-	return "http://127.0.0.1:" + novncPort + "/vnc.html", "loopback", "127.0.0.1"
+	return "http://127.0.0.1:" + doorPort + "/", "loopback", "127.0.0.1"
+}
+
+// containerMarkers are the files Docker and Podman put in every container.
+// A variable so tests can point it at a fixture.
+var containerMarkers = []string{"/.dockerenv", "/run/.containerenv"}
+
+func inContainer() bool {
+	for _, f := range containerMarkers {
+		if _, err := os.Stat(f); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func validIPv4(s string) bool {
@@ -202,7 +229,7 @@ func liveDoor(state browser.State) *Door {
 	if time.Now().Unix() > d.Expires {
 		return nil
 	}
-	if !procAlive(d.VNCPid, "x11vnc") || !procAlive(d.NoVNCPid, "websockify") {
+	if !procAlive(d.Pid, doorProc) {
 		return nil
 	}
 	if _, err := os.Stat(d.PassFile); err != nil {
@@ -211,21 +238,41 @@ func liveDoor(state browser.State) *Door {
 	return &d
 }
 
-// closeDoor kills the door's processes and shreds its password file.
-// Pids are identity-checked first, so a recycled pid kills nothing
-// innocent. The kill targets the whole process group: the recorded pids
-// are `timeout` wrappers, and killing a wrapper alone would orphan the
-// server it guards. Every step is best-effort: a dead group or missing
-// file is the desired end state already.
+// closeDoor kills the door process and shreds its password file. The pid
+// is identity-checked first, so a recycled pid kills nothing innocent.
+// Every step is best-effort: a dead process or missing file is the
+// desired end state already.
 func closeDoor(d *Door) {
-	killGroup(d.VNCPid, "x11vnc")
-	killGroup(d.NoVNCPid, "websockify")
+	// A door this process started and saw exit is already gone, and its pid
+	// may belong to another program by now (macOS has no cmdline to prove
+	// otherwise), so it is never signalled.
+	if d.exited != nil {
+		select {
+		case <-d.exited:
+			shred(d.PassFile)
+			return
+		default:
+		}
+	}
+	killGroup(d.Pid, doorProc)
 	shred(d.PassFile)
 }
 
+// removeRecordFor drops the door record only when it still names pid: a
+// newer door's record is never removed by an older door's cleanup.
+func removeRecordFor(state browser.State, pid int) {
+	raw, err := os.ReadFile(doorRecord(state))
+	if err != nil {
+		return
+	}
+	var d Door
+	if json.Unmarshal(raw, &d) == nil && d.Pid == pid {
+		_ = os.Remove(doorRecord(state))
+	}
+}
+
 // killGroup kills a process group whose leader is the recorded door
-// process. The group (not the pid) is what guarantees the timeout wrapper
-// and the server it guards die together.
+// process, so nothing the door started outlives it.
 //
 // The gate is deliberately "kill unless we can prove this is somebody
 // else", not "kill only if the cmdline matches". A pid in its fork-to-exec
@@ -334,24 +381,14 @@ func writeRecord(state browser.State, d *Door) error {
 	return os.Rename(tmp, doorRecord(state))
 }
 
-// startDoor opens a fresh login door: temp password, x11vnc, loopback
-// websockify, record on disk. On any failure it undoes the partial start.
-// Both servers run under `timeout`, so the door processes die at TTL even
-// if no later tool call ever reaps the record.
+// startDoor opens a fresh login door: temp password, one door process
+// serving the resident browser over CDP, record on disk. On any failure it
+// undoes the partial start. The door exits at TTL on its own, so it dies
+// even if no later tool call ever reaps the record.
 func startDoor(state browser.State) (*Door, string, error) {
-	x11vnc, err := exec.LookPath("x11vnc")
+	exe, err := os.Executable()
 	if err != nil {
-		return nil, "", fmt.Errorf("x11vnc is not installed, so no login door can open")
-	}
-	websockify, err := exec.LookPath("websockify")
-	if err != nil {
-		return nil, "", fmt.Errorf("websockify is not installed, so no login door can open")
-	}
-	if _, err := exec.LookPath("timeout"); err != nil {
-		return nil, "", fmt.Errorf("timeout is not installed, so no login door can open")
-	}
-	if info, err := os.Stat(novncWeb); err != nil || !info.IsDir() {
-		return nil, "", fmt.Errorf("%s is missing, so noVNC has nothing to serve", novncWeb)
+		return nil, "", fmt.Errorf("cannot find this binary to run the door: %v", err)
 	}
 	pass, err := tempPassword()
 	if err != nil {
@@ -362,91 +399,138 @@ func startDoor(state browser.State) (*Door, string, error) {
 		return nil, "", err
 	}
 	_ = os.Chmod(dir, 0o700)
-	passFile := filepath.Join(dir, "vncpass")
-	// Pre-created 0600, so the secret never sits under the umask even
-	// briefly. The password travels once in argv to x11vnc's own writer;
-	// piping it instead is version-fragile (probed: this x11vnc demands
-	// an interactive confirmation), and the exposure is one local exec.
-	if err := os.WriteFile(passFile, nil, 0o600); err != nil {
+	// 0600 from creation, read once by the door and shredded on close;
+	// the password never travels in argv.
+	// One file per door: a door that outlives its replacement shreds its
+	// own password on exit, never the new door's. Any file left from a
+	// door that died without cleaning up (or the old fixed name) is
+	// shredded here, since the door being replaced is already closed.
+	if old, _ := filepath.Glob(filepath.Join(dir, "doorpass*")); len(old) > 0 {
+		for _, f := range old {
+			shred(f)
+		}
+	}
+	passFile := filepath.Join(dir, fmt.Sprintf("doorpass-%d", time.Now().UnixNano()))
+	if err := os.WriteFile(passFile, []byte(pass), 0o600); err != nil {
 		return nil, "", err
 	}
-	// ponytail: x11vnc's own writer; a hand-rolled obfuscation would be a
-	// second, worse copy of it.
-	if out, err := exec.Command(x11vnc, "-storepasswd", pass, passFile).CombinedOutput(); err != nil {
+	logPath := filepath.Join(dir, "door.log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
 		shred(passFile)
-		return nil, "", fmt.Errorf("could not store the door password: %v %s", err, bytes.TrimSpace(out))
+		return nil, "", err
 	}
-	_ = os.Chmod(passFile, 0o600)
+	defer logFile.Close()
+	link, via, bind := doorURL()
+	port := doorPort // a published port must be the one the host maps
+	if via != "published" {
+		port = pickPort(bind)
+	}
+	link = strings.Replace(link, ":"+doorPort+"/", ":"+port+"/", 1)
+	addr := net.JoinHostPort(bind, port)
 	ttl := strconv.FormatInt(int64(doorTTL/time.Second), 10)
-	undo := func(cmds ...*exec.Cmd) {
-		for _, c := range cmds {
-			if c != nil && c.Process != nil {
-				_ = syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
-				// Reap promptly: without Wait the child lingers as a
-				// zombie under this long-lived server. (Doors reaped
-				// later from the record have no handle to wait on;
-				// those zombies clear when the server exits, bounded
-				// by door count.)
-				_, _ = c.Process.Wait()
-			}
-		}
+	cmd := exec.Command(exe, "door", addr, ttl, passFile)
+	cmd.Args[0] = doorProc
+	cmd.Env = append(os.Environ(), "ICLOUD_CDP="+state.CDP)
+	// Own process group, so group-kill in closeDoor never takes the caller.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	if err := cmd.Start(); err != nil {
+		shred(passFile)
+		return nil, "", fmt.Errorf("could not start the door: %v", err)
+	}
+	// Reap it whenever it exits, so it never lingers as a zombie under
+	// this long-lived server.
+	exited := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(exited) }()
+	undo := func() {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		shred(passFile)
 	}
-	vncLog := &bytes.Buffer{}
-	vnc := exec.Command("timeout", ttl+"s", x11vnc, "-display", ":99", "-localhost",
-		"-rfbauth", passFile, "-rfbport", vncPort,
-		"-forever", "-shared", "-noxdamage", "-quiet")
-	// Own process group per door server, so group-kill in closeDoor and
-	// undo takes wrapper plus guarded server and never the caller.
-	vnc.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	vnc.Stderr = vncLog
-	if err := vnc.Start(); err != nil {
+	// The port answering is not enough: in published mode the port is
+	// fixed, and a door being replaced can still hold it for a moment.
+	if !listening(addr, 3*time.Second) || !procAlive(cmd.Process.Pid, doorProc) {
 		undo()
-		return nil, "", fmt.Errorf("could not start x11vnc: %v", err)
-	}
-	if !aliveSoon(vnc, "x11vnc", 2*time.Second) {
-		undo(vnc)
-		return nil, "", fmt.Errorf("x11vnc died at startup (port %s busy, or no X display :99): %s",
-			vncPort, bytes.TrimSpace(vncLog.Bytes()))
-	}
-	novncLog := &bytes.Buffer{}
-	link, via, bind := novncURL()
-	novnc := exec.Command("timeout", ttl+"s", websockify, "--web="+novncWeb,
-		bind+":"+novncPort, "127.0.0.1:"+vncPort)
-	novnc.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	novnc.Stderr = novncLog
-	if err := novnc.Start(); err != nil {
-		undo(vnc)
-		return nil, "", fmt.Errorf("could not start websockify: %v", err)
-	}
-	if !aliveSoon(novnc, "websockify", 2*time.Second) {
-		undo(vnc, novnc)
-		return nil, "", fmt.Errorf("websockify died at startup (port %s busy?): %s",
-			novncPort, bytes.TrimSpace(novncLog.Bytes()))
+		out, _ := os.ReadFile(logPath)
+		return nil, "", fmt.Errorf("the door did not come up on %s: %s", addr, strings.TrimSpace(string(out)))
 	}
 	now := time.Now()
 	d := &Door{
-		VNCPid:   vnc.Process.Pid,
-		NoVNCPid: novnc.Process.Pid,
+		Pid:      cmd.Process.Pid,
 		Expires:  now.Add(doorTTL).Unix(),
 		PassFile: passFile,
 		URL:      link,
 		Via:      via,
 		Created:  now.Unix(),
+		exited:   exited,
 	}
 	if err := writeRecord(state, d); err != nil {
-		undo(vnc, novnc)
+		undo()
 		return nil, "", err
 	}
 	return d, pass, nil
 }
 
-// aliveSoon reports whether cmd is still the expected living process
-// after a grace period.
-func aliveSoon(cmd *exec.Cmd, want string, grace time.Duration) bool {
-	time.Sleep(grace)
-	if cmd.Process == nil {
-		return false
+// pickPort is doorPort when it is free on bind, else any free port.
+func pickPort(bind string) string {
+	for _, want := range []string{doorPort, "0"} {
+		if l, err := net.Listen("tcp", net.JoinHostPort(bind, want)); err == nil {
+			_, port, _ := net.SplitHostPort(l.Addr().String())
+			_ = l.Close()
+			return port
+		}
 	}
-	return procAlive(cmd.Process.Pid, want)
+	return doorPort
+}
+
+// listening reports whether addr accepts a TCP connection within wait.
+func listening(addr string, wait time.Duration) bool {
+	for deadline := time.Now().Add(wait); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
+		if c, err := net.DialTimeout("tcp", addr, 200*time.Millisecond); err == nil {
+			_ = c.Close()
+			return true
+		}
+	}
+	return false
+}
+
+// replaceDoor closes any open door and opens a fresh one, so every open
+// issues a new password and an old one stops working at once.
+func replaceDoor(state browser.State) (*Door, string, error) {
+	if raw, err := os.ReadFile(doorRecord(state)); err == nil {
+		var old Door
+		if json.Unmarshal(raw, &old) == nil {
+			closeDoor(&old)
+			// Wait for it to go: in published mode the port is fixed, and
+			// a dying door still answering there would pass the new door's
+			// readiness check before the new one had bound.
+			for i := 0; i < 30 && old.Pid > 0 && procAlive(old.Pid, doorProc); i++ {
+				time.Sleep(100 * time.Millisecond)
+			}
+			removeRecordFor(state, old.Pid)
+		} else {
+			_ = os.Remove(doorRecord(state)) // unreadable: nobody's
+		}
+	}
+	return startDoor(state)
+}
+
+// OpenDoor is replaceDoor for the operator's `icloud-mcp login`: no ask,
+// because whoever runs it on the host is the owner. It returns the door,
+// its one-time password, and a close func that kills it and drops the
+// record.
+func OpenDoor(state browser.State) (*Door, string, func(), error) {
+	// The same lock open_login holds, so the two never replace each
+	// other's door halfway.
+	unlock, err := browser.AppLock(state.Dir, "login-door", 60*time.Second)
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("another login-door operation is still running")
+	}
+	defer unlock()
+	d, pass, err := replaceDoor(state)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	return d, pass, func() { closeDoor(d); removeRecordFor(state, d.Pid) }, nil
 }

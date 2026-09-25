@@ -156,8 +156,9 @@ func (c *wsConn) pingTab(targetID string) error {
 		return err
 	}
 	defer c.tabDetach(session)
-	_, err = c.evalInFrameTimeout(session, "", `() => 1`, nil, 15*time.Second)
-	return err
+	// Liveness only, so the page's own main world will do: an isolated world
+	// needs a real frame id, and current Chrome rejects the empty one.
+	return c.callTimeout(session, "Runtime.evaluate", map[string]any{"expression": "1"}, nil, 15*time.Second)
 }
 
 // Outcome is the session verdict. The four answers need four different
@@ -168,7 +169,7 @@ const (
 	// OK means the resident browser can reach iCloud data.
 	OK Outcome = iota
 	// SignedOut means the session is gone: only a human signing in
-	// through VNC fixes it.
+	// through the login door fixes it.
 	SignedOut
 	// Unreachable means no browser to talk to.
 	Unreachable

@@ -122,10 +122,19 @@ func publicRow(r Row) map[string]any {
 // stripped: the list truncates long titles. Compared by runes: byte
 // slicing splits multi-byte titles mid-character.
 func sameTitle(rowTitle, firstLine string) bool {
-	row := []rune(strings.ToLower(strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(rowTitle, "…", ""), "...", ""))))
-	line := []rune(strings.ToLower(strings.TrimSpace(firstLine)))
-	width := min(len(row), len(line), 30)
-	return width > 0 && string(row[:width]) == string(line[:width])
+	norm := func(s string) string { return strings.ToLower(strings.Join(strings.Fields(s), " ")) }
+	row, line := norm(rowTitle), norm(firstLine)
+	// Exact, unless the list itself truncated the title: a 30-character
+	// prefix once matched "[icloud-mcp verify] 20260925-1125" against
+	// "[icloud-mcp verify] 20260925-1132-probe2", and only the snippet
+	// check stopped a write to the wrong note.
+	for _, cut := range []string{"…", "..."} {
+		if strings.HasSuffix(row, cut) {
+			row = strings.TrimSpace(strings.TrimSuffix(row, cut))
+			return row != "" && strings.HasPrefix(line, row)
+		}
+	}
+	return row != "" && line == row
 }
 
 // titleMatches reports whether a row names a just-written note. Both sides
@@ -450,8 +459,17 @@ func (c *Client) openVerified(tab *browser.Tab, title string, folder *string, ma
 	// sometimes copies an empty clipboard, which fails the identity check
 	// for a reason that has nothing to do with identity.
 	for range 3 {
-		ok, err := tab.Click("note-list-item-container", wanted.Slot)
-		if err != nil || !ok {
+		var pt *struct{ X, Y int }
+		if raw, err := tab.Eval(noteRowPointJS, []any{wanted.Title, wanted.Date}); err == nil {
+			_ = json.Unmarshal(raw, &pt)
+		}
+		if pt != nil {
+			if err := tab.MouseClick(pt.X, pt.Y); err != nil {
+				return nil, map[string]any{"error": "could not open that note"}
+			}
+		} else if ok, err := tab.PointerClick("note-list-item-container", wanted.Slot); err != nil || !ok {
+			// ponytail: off-screen notes fall back to the slot; scroll the
+			// list to the row if long lists start opening the wrong note.
 			return nil, map[string]any{"error": "could not open that note"}
 		}
 		sleep(6000)
@@ -719,14 +737,10 @@ func (c *Client) Create(ctx context.Context, title, body string, folder *string)
 			// Body only: the title was already typed above, and pasting
 			// it again would duplicate it. (Replace keeps its h1 because
 			// select-all takes the title too.)
-			if err := tab.GrantClipboard(); err != nil {
-				return nil, err
-			}
 			html := MarkdownToHTML(body)
 			_ = tab.Key("Enter", 0)
 			sleep(500)
-			clip, err := tab.EvalText(setClipboardJS, html)
-			if err == nil && clip == "ok" {
+			if clip := writeClipboard(tab, html); clip == "ok" {
 				_ = tab.KeyCombo("v")
 				sleep(3000)
 				pasted = "html"
@@ -775,8 +789,7 @@ func (c *Client) replaceBody(ctx context.Context, title, body string, folder *st
 		}
 		previous := vn.text
 		html := "<h1>" + Escape(vn.row.Title) + "</h1>" + MarkdownToHTML(body)
-		clip, err := tab.EvalText(setClipboardJS, html)
-		if err != nil || clip != "ok" {
+		if clip := writeClipboard(tab, html); clip != "ok" {
 			return map[string]any{"updated": false, "title": vn.row.Title,
 				"error": fmt.Sprintf("the clipboard was refused, so nothing was replaced: %s", clip)}, nil
 		}
@@ -791,6 +804,7 @@ func (c *Client) replaceBody(ctx context.Context, title, body string, folder *st
 		_ = tab.KeyCombo("a")
 		_ = tab.KeyCombo("c")
 		sleep(1500)
+		_ = tab.GrantClipboard()
 		written, err := tab.EvalText(readClipboardJS, nil)
 		if err != nil {
 			written = ""
@@ -1035,4 +1049,29 @@ func runClient(cfg *config.Config, ask func(ctx context.Context, question string
 		return mcp.NewToolResultError(shortError(err)), nil
 	}
 	return mcpserver.ResultJSON(out)
+}
+
+// writeClipboard puts html on the clipboard, granting the permission right
+// before the write and once more on a refusal: a DevTools permission
+// override lives only as long as the connection that set it, so the grant
+// belongs next to the write it serves. A refusal after both tries comes
+// back with the permission state and focus, so the next report says why.
+func writeClipboard(tab *browser.Tab, html string) string {
+	clip, grantErr := "", ""
+	for try := 0; try < 2; try++ {
+		if err := tab.GrantClipboard(); err != nil {
+			grantErr = " grant: " + err.Error()
+		}
+		var err error
+		clip, err = tab.EvalText(setClipboardJS, html)
+		if err == nil && clip == "ok" {
+			return "ok"
+		}
+		if err != nil {
+			clip = err.Error()
+		}
+		sleep(500)
+	}
+	state, _ := tab.EvalText(clipboardStateJS, nil)
+	return clip + " (" + state + grantErr + ")"
 }

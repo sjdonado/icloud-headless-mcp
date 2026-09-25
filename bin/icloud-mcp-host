@@ -1,0 +1,19 @@
+#!/bin/bash
+# Run icloud-mcp as the service account with this install's environment, for the operator:
+#
+#   sudo -u agent-icloud -H /opt/agent-icloud/bin/icloud-mcp-host login
+#   sudo -u agent-icloud -H /opt/agent-icloud/bin/icloud-mcp-host session-check
+#
+# What it supplies and the env file does not, because it is about this host rather than about the
+# account: HOME and the state paths of this worked example (the env file may still name its own),
+# and ICLOUD_RESIDENT=external because systemd's agent-browser owns the browser here, so nothing
+# started through this wrapper starts a second one. stdio.sh is this wrapper with no arguments.
+set -euo pipefail
+set -a
+. /etc/agent/icloud.env
+set +a
+export HOME=/opt/agent-icloud
+export ICLOUD_STATE="${ICLOUD_STATE:-/opt/agent-icloud}"
+export ICLOUD_SHARED_STATE="${ICLOUD_SHARED_STATE:-/opt/agent-icloud/shared-state}"
+export ICLOUD_RESIDENT=external
+exec /opt/agent-icloud/bin/icloud-mcp "$@"

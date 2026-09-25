@@ -32,7 +32,7 @@ type NeedsApprovalError struct{ Msg string }
 func (e *NeedsApprovalError) Error() string { return e.Msg }
 
 // SignedOutError means the browser session expired. No retry helps and no
-// restart helps; only a human signing in through VNC.
+// restart helps; only a human signing in through the login door.
 type SignedOutError struct{ Msg string }
 
 func (e *SignedOutError) Error() string { return e.Msg }
@@ -137,6 +137,22 @@ func (t *Tab) Click(class string, index int) (bool, error) {
 		return false, err
 	}
 	return ok, nil
+}
+
+// PointerClick clicks the nth element with a class token with a trusted
+// CDP mouse event. Page-dispatched events (Click) are untrusted, and the
+// Notes list ignored them now and then, leaving the previous note open.
+func (t *Tab) PointerClick(class string, index int) (bool, error) {
+	raw, err := t.Eval(PointJS, []any{class, index})
+	if err != nil {
+		return false, err
+	}
+	var pt *struct{ X, Y int }
+	if err := json.Unmarshal(raw, &pt); err != nil || pt == nil {
+		return false, err
+	}
+	sleepMS(300)
+	return true, t.MouseClick(pt.X, pt.Y)
 }
 
 // GrantClipboard allows clipboard read/write on the iCloud origin, which
@@ -302,6 +318,11 @@ func (app App) Open(state State, owner *time.Location, now time.Time) (*Tab, err
 		return fail(err)
 	}
 	conn.setTimezone(session, owner.String())
+	// Only the front tab is visible in a headless window, and Chromium
+	// throttles hidden ones (Reminders read document.hidden=true while
+	// Notes was in front): clicks only selected, focus arrived late, and
+	// popovers closed late. The tab being driven goes to the front.
+	_ = conn.call(session, "Page.bringToFront", map[string]any{}, nil)
 
 	navigated := openedHere || !strings.Contains(tab.URL, match)
 	if navigated && QuietHoursAt(owner, now) {

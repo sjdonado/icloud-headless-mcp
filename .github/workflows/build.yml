@@ -73,7 +73,7 @@ jobs:
           mkdir -p "dist/$name/bin" "dist/$name/systemd" "dist/$name/sudoers.d"
           cp dist/icloud-mcp "dist/$name/bin/icloud-mcp"
           cp stdio.sh "dist/$name/bin/stdio.sh"
-          cp bin/agent-reask-access bin/icloud-login.sh "dist/$name/bin/"
+          cp bin/agent-reask-access bin/icloud-mcp-host "dist/$name/bin/"
           cp systemd/* "dist/$name/systemd/"
           cp sudoers.d/* "dist/$name/sudoers.d/"
           cp .env.example LICENSE "dist/$name/"

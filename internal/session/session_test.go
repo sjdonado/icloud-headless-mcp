@@ -21,9 +21,8 @@ func TestTempPassword(t *testing.T) {
 		if err != nil {
 			t.Fatalf("tempPassword: %v", err)
 		}
-		// Exactly 8: classic VNC auth truncates longer passwords silently.
-		if len(p) != 8 {
-			t.Fatalf("password %q is %d chars, want exactly 8", p, len(p))
+		if len(p) != 16 {
+			t.Fatalf("password %q is %d chars, want 16", p, len(p))
 		}
 		for _, r := range p {
 			if !strings.ContainsRune("abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789", r) {
@@ -82,22 +81,22 @@ func TestReapDoorsEmpty(t *testing.T) {
 	}
 }
 
-func writeRawRecord(t *testing.T, state browser.State, vncPid, novncPid int, expires int64, passfile string) {
+func writeRawRecord(t *testing.T, state browser.State, pid int, expires int64, passfile string) {
 	t.Helper()
 	if err := os.MkdirAll(doorDir(state), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	raw := `{"vnc_pid":` + itoa(vncPid) + `,"novnc_pid":` + itoa(novncPid) +
+	raw := `{"pid":` + itoa(pid) +
 		`,"expires_unix":` + itoa64(expires) + `,"passfile":` + quoted(passfile) +
-		`,"url":"http://127.0.0.1:6080/vnc.html","via":"loopback","created_unix":` + itoa64(expires-1) + `}`
+		`,"url":"http://127.0.0.1:6080/","via":"loopback","created_unix":` + itoa64(expires-1) + `}`
 	if err := os.WriteFile(doorRecord(state), []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
 
 // startNamed starts a sleeper whose cmdline contains name as a substring,
-// the property procAlive matches on (production door pids are timeout
-// wrappers whose cmdlines contain the server name deeper in). Group
+// the property procAlive matches on (the production door process sets its
+// argv[0] to doorProc). Group
 // semantics themselves are covered by TestKillGroupTakesWholeGroup, so
 // this only shapes argv.
 func startNamed(t *testing.T, argv0 string) *exec.Cmd {
@@ -117,19 +116,18 @@ func startNamed(t *testing.T, argv0 string) *exec.Cmd {
 
 func TestLiveDoorAndExpiredReap(t *testing.T) {
 	state, _ := testState(t)
-	passfile := filepath.Join(t.TempDir(), "vncpass")
+	passfile := filepath.Join(t.TempDir(), "doorpass")
 	if err := os.WriteFile(passfile, []byte("secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// Live processes shaped like the door servers; expiry in the future.
-	vnc := startNamed(t, "x11vnc")
-	novnc := startNamed(t, "websockify")
-	writeRawRecord(t, state, vnc.Process.Pid, novnc.Process.Pid, time.Now().Add(time.Hour).Unix(), passfile)
+	// A live process shaped like the door; expiry in the future.
+	door := startNamed(t, doorProc)
+	writeRawRecord(t, state, door.Process.Pid, time.Now().Add(time.Hour).Unix(), passfile)
 	if d := liveDoor(state); d == nil {
 		t.Fatal("recorded live door reads back dead")
 	}
 	// Expired: reap closes, shreds, and removes without touching CDP.
-	writeRawRecord(t, state, 1<<30, 1<<30, time.Now().Add(-time.Minute).Unix(), passfile)
+	writeRawRecord(t, state, 1<<30, time.Now().Add(-time.Minute).Unix(), passfile)
 	out := ReapDoors(state)
 	if len(out) != 1 || !strings.Contains(out[0], "expired") {
 		t.Fatalf("expired reap = %v, want one expired line", out)
@@ -142,10 +140,10 @@ func TestLiveDoorAndExpiredReap(t *testing.T) {
 	}
 }
 
-func TestNovncURLLoopbackWithoutTailscale(t *testing.T) {
+func TestDoorURLLoopbackWithoutTailscale(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
-	url, via, bind := novncURL()
-	if via != "loopback" || bind != "127.0.0.1" || url != "http://127.0.0.1:6080/vnc.html" {
+	url, via, bind := doorURL()
+	if via != "loopback" || bind != "127.0.0.1" || url != "http://127.0.0.1:6080/" {
 		t.Fatalf("no tailscale should mean loopback, got %q via %q", url, via)
 	}
 }
@@ -189,34 +187,54 @@ func TestProcAlive(t *testing.T) {
 		}
 	}
 	me := os.Getpid()
-	mkproc(itoa(me), "x11vnc -display :99\x00", "1 (x11vnc) R 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 0 0 0 0")
-	if !procAlive(me, "x11vnc") {
+	mkproc(itoa(me), "icloud-login-door door\x00", "1 (door) R 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 0 0 0 0")
+	if !procAlive(me, doorProc) {
 		t.Fatal("matching live process should be alive")
 	}
-	if procAlive(me, "websockify") {
+	if procAlive(me, "other-binary") {
 		t.Fatal("cmdline mismatch should not be alive")
 	}
-	mkproc(itoa(me+1), "x11vnc -display :99\x00", "1 (x11vnc) Z 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 0 0 0 0")
+	mkproc(itoa(me+1), "icloud-login-door door\x00", "1 (door) Z 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 0 0 0 0")
 	// pid me+1 may or may not exist as a real process; the zombie fixture
 	// only matters when the signal check passes, so assert the mismatch
 	// path instead: wrong binary never passes.
 	if procAlive(me+1, "definitely-not-this-binary-name") {
 		t.Fatal("cmdline mismatch should never pass")
 	}
-	if procAlive(1<<30, "x11vnc") {
+	if procAlive(1<<30, doorProc) {
 		t.Fatal("nonexistent pid should not be alive")
 	}
 }
 
-func TestNovncURLRejectsGarbageTailscale(t *testing.T) {
+func TestDoorURLPublishedBind(t *testing.T) {
+	t.Setenv("ICLOUD_DOOR_BIND", "0.0.0.0")
+	t.Setenv("PATH", t.TempDir()) // no tailscale
+	old := containerMarkers
+	defer func() { containerMarkers = old }()
+	containerMarkers = []string{filepath.Join(t.TempDir(), "absent")}
+	if _, via, bind := doorURL(); via == "published" || bind == "0.0.0.0" {
+		t.Fatalf("outside a container the bind override must be ignored, got %q %q", via, bind)
+	}
+	marker := filepath.Join(t.TempDir(), ".dockerenv")
+	if err := os.WriteFile(marker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	containerMarkers = []string{marker}
+	url, via, bind := doorURL()
+	if via != "published" || bind != "0.0.0.0" || url != "http://127.0.0.1:6080/" {
+		t.Fatalf("container bind: got %q %q %q", url, via, bind)
+	}
+}
+
+func TestDoorURLRejectsGarbageTailscale(t *testing.T) {
 	dir := t.TempDir()
 	script := "#!/bin/sh\necho 'not-an-ip'\n"
 	if err := os.WriteFile(filepath.Join(dir, "tailscale"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir)
-	url, via, bind := novncURL()
-	if via != "loopback" || bind != "127.0.0.1" || url != "http://127.0.0.1:6080/vnc.html" {
+	url, via, bind := doorURL()
+	if via != "loopback" || bind != "127.0.0.1" || url != "http://127.0.0.1:6080/" {
 		t.Fatalf("garbage tailscale output should mean loopback, got %q %q %q", url, via, bind)
 	}
 }
@@ -278,12 +296,12 @@ func TestKillGroupTakesWholeGroup(t *testing.T) {
 
 func TestSweepExpiredRemovesDeadDoor(t *testing.T) {
 	state, _ := testState(t)
-	passfile := filepath.Join(t.TempDir(), "vncpass")
+	passfile := filepath.Join(t.TempDir(), "doorpass")
 	if err := os.WriteFile(passfile, []byte("secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// Unexpired record, dead processes: the secret must not sit until TTL.
-	writeRawRecord(t, state, 1<<30, 1<<30, time.Now().Add(time.Hour).Unix(), passfile)
+	writeRawRecord(t, state, 1<<30, time.Now().Add(time.Hour).Unix(), passfile)
 	out := sweepExpired(state)
 	if len(out) != 1 || !strings.Contains(out[0], "dead") {
 		t.Fatalf("dead door should sweep with one dead line, got %v", out)
@@ -298,13 +316,13 @@ func TestSweepExpiredRemovesDeadDoor(t *testing.T) {
 
 func TestLiveDoorVerifiesCmdline(t *testing.T) {
 	state, _ := testState(t)
-	passfile := filepath.Join(t.TempDir(), "vncpass")
+	passfile := filepath.Join(t.TempDir(), "doorpass")
 	if err := os.WriteFile(passfile, []byte("secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// Fixture /proc keyed by two alive pids (self plus parent): the
-	// match/mismatch decision is then platform-independent, unlike the
-	// real-process case which is vacuous where /proc is absent.
+	// Fixture /proc keyed by an alive pid (self): the match/mismatch
+	// decision is then platform-independent, unlike the real-process case
+	// which is vacuous where /proc is absent.
 	root := t.TempDir()
 	old := procFS
 	procFS = root
@@ -322,15 +340,13 @@ func TestLiveDoorVerifiesCmdline(t *testing.T) {
 		}
 	}
 	stat := "1 (test) S 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 1 0 0 0 0 0 0"
-	me, parent := os.Getpid(), os.Getppid()
+	me := os.Getpid()
 	writeProc(me, "test binary\x00", stat)
-	writeProc(parent, "test runner\x00", stat)
-	writeRawRecord(t, state, me, parent, time.Now().Add(time.Hour).Unix(), passfile)
+	writeRawRecord(t, state, me, time.Now().Add(time.Hour).Unix(), passfile)
 	if d := liveDoor(state); d != nil {
 		t.Fatal("cmdline mismatch should read the door dead")
 	}
-	writeProc(me, "timeout 1200s /usr/bin/x11vnc -display :99\x00", stat)
-	writeProc(parent, "python3 /usr/bin/websockify --web=/usr/share/novnc\x00", stat)
+	writeProc(me, doorProc+"\x00door\x00127.0.0.1\x001200\x00/state/doorpass\x00", stat)
 	if d := liveDoor(state); d == nil {
 		t.Fatal("cmdline match should read the door live")
 	}
@@ -369,9 +385,38 @@ func TestKillGroupSparesRecycledPid(t *testing.T) {
 		_ = cmd.Process.Kill()
 		_, _ = cmd.Process.Wait()
 	}()
-	killGroup(cmd.Process.Pid, "x11vnc")
+	killGroup(cmd.Process.Pid, doorProc)
 	time.Sleep(100 * time.Millisecond)
 	if !procExists(cmd.Process.Pid) {
 		t.Fatal("killGroup killed a process whose cmdline named another program")
+	}
+}
+
+// TestDoorCleanupOwnsOnlyItsRecord: an older door's cleanup must not drop
+// the record of the door that replaced it.
+func TestDoorCleanupOwnsOnlyItsRecord(t *testing.T) {
+	state, _ := testState(t)
+	passfile := filepath.Join(t.TempDir(), "doorpass-1")
+	writeRawRecord(t, state, 4242, time.Now().Add(time.Hour).Unix(), passfile)
+	removeRecordFor(state, 1111)
+	if _, err := os.Stat(doorRecord(state)); err != nil {
+		t.Fatal("a cleanup for another pid removed the record")
+	}
+	removeRecordFor(state, 4242)
+	if _, err := os.Stat(doorRecord(state)); !os.IsNotExist(err) {
+		t.Fatal("the owning door's cleanup left its record")
+	}
+}
+
+// TestCloseDoorSparesAnExitedDoorsPid: once this process saw the door
+// exit, its pid may be anyone's, so closeDoor must not signal it.
+func TestCloseDoorSparesAnExitedDoorsPid(t *testing.T) {
+	bystander := startNamed(t, doorProc) // wears the door's name, like a recycled pid could
+	exited := make(chan struct{})
+	close(exited)
+	closeDoor(&Door{Pid: bystander.Process.Pid, PassFile: filepath.Join(t.TempDir(), "p"), exited: exited})
+	time.Sleep(100 * time.Millisecond)
+	if !procExists(bystander.Process.Pid) {
+		t.Fatal("closeDoor signalled the pid of a door it had seen exit")
 	}
 }

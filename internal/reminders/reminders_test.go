@@ -17,7 +17,7 @@ func TestSnippetsInterpolateCleanly(t *testing.T) {
 		"rowGeo": rowGeo, "toggleDay": toggleDay, "calMonth": calMonth,
 		"prevMonth": prevMonth, "nextMonth": nextMonth, "clickDay": clickDay,
 		"segments": segments, "saveBtn": saveBtn, "popoverOpen": popoverOpen,
-		"scrollEnd": scrollEnd, "focusNewRow": focusNewRow,
+		"scrollEnd": scrollEnd, "rowWithAria": rowWithAria, "countAria": countAria, "focusEmptyRow": focusEmptyRow, "focusRowTitled": focusRowTitled, "focusInRow": focusInRow, "focusSegment": focusSegment,
 		"timeCheckbox": timeCheckbox, "segment": segment,
 		"timeSegments": timeSegments, "completeGeo": completeGeo,
 	} {

@@ -905,7 +905,13 @@ func (c *Client) setTime(tab *browser.Tab, hour, minute int, when time.Time) str
 	if msg, bad := box["error"].(string); bad {
 		return msg
 	}
-	if checked, _ := box["checked"].(bool); !checked {
+	// Tick Time until it reads ticked: one click can land without taking
+	// (headless, Chromium 153: the segments stayed "––" after a single
+	// click), and typing into a disabled time field goes nowhere.
+	for i := 0; i < 3; i++ {
+		if checked, _ := box["checked"].(bool); checked {
+			break
+		}
 		pt, msg := evalPoint(tab, timeCheckbox, nil)
 		if msg != "" {
 			return msg
@@ -914,26 +920,48 @@ func (c *Client) setTime(tab *browser.Tab, hour, minute int, when time.Time) str
 			return shortError(err)
 		}
 		sleep(1500)
+		box = map[string]any{}
+		if err := tab.EvalJSON(timeCheckbox, nil, &box); err != nil {
+			return shortError(err)
+		}
 	}
-	seg, msg := evalPoint(tab, segment, "hour")
-	if msg != "" {
-		return msg
+	if checked, _ := box["checked"].(bool); !checked {
+		return "could not turn on the time for the due date"
 	}
-	// Re-fetch the text: evalPoint only returns coordinates.
-	hourText := segmentText(tab, "hour")
-	_ = hourText
-	if err := tab.MouseClick(seg.X, seg.Y); err != nil {
-		return shortError(err)
-	}
-	sleep(600)
 	h12 := hour % 12
 	if h12 == 0 {
 		h12 = 12
 	}
-	if err := tab.TypeText(fmt.Sprintf("%02d%02d", h12, minute)); err != nil {
-		return shortError(err)
+	hourMinuteOK := func(got map[string]string) bool {
+		return (got["hour"] == strconv.Itoa(h12) || got["hour"] == fmt.Sprintf("%02d", h12)) &&
+			(got["minute"] == strconv.Itoa(minute) || got["minute"] == fmt.Sprintf("%02d", minute))
 	}
-	sleep(700)
+	// Focus the hour segment directly, then type: clicking its measured
+	// center focused AM/PM instead (headless, Chromium 153), and every
+	// digit went there. Retry until the picker shows the time.
+	for i := 0; i < 3; i++ {
+		if !evalBool(tab, focusSegment, "hour") {
+			seg, msg := evalPoint(tab, segment, "hour")
+			if msg != "" {
+				return msg
+			}
+			if err := tab.MouseClick(seg.X, seg.Y); err != nil {
+				return shortError(err)
+			}
+		}
+		sleep(600)
+		// Key presses, not insertText: the segments are spinbuttons,
+		// which take keydown and ignore inserted text.
+		for _, d := range fmt.Sprintf("%02d%02d", h12, minute) {
+			if err := tab.Key(string(d), 120); err != nil {
+				return shortError(err)
+			}
+		}
+		sleep(700)
+		if hourMinuteOK(readTimeSegments(tab)) {
+			break
+		}
+	}
 	wantAMPM := "AM"
 	if hour >= 12 {
 		wantAMPM = "PM"
@@ -956,22 +984,10 @@ func (c *Client) setTime(tab *browser.Tab, hour, minute int, when time.Time) str
 	}
 	sleep(500)
 	got := readTimeSegments(tab)
-	hourOK := got["hour"] == strconv.Itoa(h12) || got["hour"] == fmt.Sprintf("%02d", h12)
-	minuteOK := got["minute"] == strconv.Itoa(minute) || got["minute"] == fmt.Sprintf("%02d", minute)
-	if !hourOK || !minuteOK || got["AM/PM"] != wantAMPM {
+	if !hourMinuteOK(got) || got["AM/PM"] != wantAMPM {
 		return fmt.Sprintf("the time picker did not take %02d:%02d, it reads %v", hour, minute, got)
 	}
 	return ""
-}
-
-func segmentText(tab *browser.Tab, which string) string {
-	var out struct {
-		Text string `json:"text"`
-	}
-	if err := tab.EvalJSON(segment, which, &out); err != nil {
-		return ""
-	}
-	return out.Text
 }
 
 func readTimeSegments(tab *browser.Tab) map[string]string {
@@ -1034,14 +1050,22 @@ func (c *Client) setDue(tab *browser.Tab, title string, when time.Time, at *dueT
 	if geo.Error != "" {
 		return geo.Error
 	}
-	if err := tab.MouseMove(geo.Row.X, geo.Row.Y); err != nil {
-		return shortError(err)
+	// The first click on info can only select the row (seen headless on
+	// Chromium 153: popover shut after one click, open after the second),
+	// so click until the popover is up rather than once.
+	for i := 0; i < 3; i++ {
+		if err := tab.MouseMove(geo.Row.X, geo.Row.Y); err != nil {
+			return shortError(err)
+		}
+		sleep(700)
+		if err := tab.MouseClick(geo.Info.X, geo.Info.Y); err != nil {
+			return shortError(err)
+		}
+		sleep(2500)
+		if evalBool(tab, popoverOpen, nil) {
+			break
+		}
 	}
-	sleep(700)
-	if err := tab.MouseClick(geo.Info.X, geo.Info.Y); err != nil {
-		return shortError(err)
-	}
-	sleep(2500)
 
 	state, err := tab.EvalText(toggleDay, nil)
 	if err != nil {
@@ -1140,14 +1164,21 @@ func (c *Client) setDue(tab *browser.Tab, title string, when time.Time, at *dueT
 	if err := tab.MouseClick(saved.X, saved.Y); err != nil {
 		return shortError(err)
 	}
-	sleep(3500)
-
-	for i := 0; i < 6; i++ {
+	// Save round-trips to iCloud before the popover closes, and that took
+	// longer than a fixed 3.5s on a real account (the row showed the due
+	// while the check still saw the popover). Wait for it, then nudge.
+	for i := 0; i < 15; i++ {
+		sleep(1000)
 		if !evalBool(tab, popoverOpen, nil) {
 			return ""
 		}
+	}
+	for i := 0; i < 3; i++ {
 		_ = tab.Key("Escape", 0)
 		sleep(1000)
+		if !evalBool(tab, popoverOpen, nil) {
+			return ""
+		}
 	}
 	return "the date was saved but the popover would not close, so the app was left mid-edit"
 }
@@ -1228,13 +1259,33 @@ func (c *Client) Complete(ctx context.Context, title, listName string) (map[stri
 				wasDue = d
 			}
 		}
-		if err := tab.MouseClick(spot.X, spot.Y); err != nil {
-			return nil, err
-		}
-		sleep(3000)
-		after, err := c.openItems(tab)
-		if err != nil {
-			return nil, err
+		// A first click can only select the row (headless, Chromium 153).
+		// Click again only once the row has read open twice, 3s apart: a
+		// slow completion clicked a second time would be un-completed.
+		var after map[string]map[string]any
+		for click := 0; click < 3; click++ {
+			if click > 0 {
+				if err := tab.EvalJSON(completeGeo, target, &spot); err != nil || spot.Error != "" {
+					break // the row is gone or ambiguous now: read the list below
+				}
+			}
+			if err := tab.MouseClick(spot.X, spot.Y); err != nil {
+				return nil, err
+			}
+			stillOpen := true
+			for check := 0; check < 2 && stillOpen; check++ {
+				sleep(3000)
+				if after, err = c.openItems(tab); err != nil {
+					return nil, err
+				}
+				_, stillOpen = after[target]
+			}
+			if !stillOpen {
+				break
+			}
+			if d, _ := after[target]["due"].(string); wasDue != "" && d != "" && d != wasDue {
+				break // a repeating reminder rolled forward: that is a completion
+			}
 		}
 		var wasDueOut any
 		if wasDue != "" {
@@ -1308,121 +1359,85 @@ func (c *Client) createWithDue(ctx context.Context, title, listName, due string,
 		}
 		var after []string
 		typed := false
-		for attempt := 0; attempt < 4; attempt++ {
-			ok, err := tab.Click("rm-new-reminder", 0)
-			if err != nil {
-				return nil, err
+		// The flow below is the one verified step by step in the page
+		// (docs: AGENTS.md, Debugging the web apps): "+" adds a row whose
+		// title field is already focused, insertText types into it, and Tab
+		// commits it, after which the row's aria-label is the title. An
+		// empty row left by an earlier attempt is reused rather than
+		// adding another; a placeholder row this call committed is
+		// retitled; "+" is pressed again only when no row appeared.
+		baseline, baseOK := c.countTitled(tab, placeholderTitle)
+		// Committed means one more row with this title than before, not
+		// "a row with this title exists": an old duplicate would pass that.
+		sameBefore, sameOK := c.countTitled(tab, strings.TrimSpace(title))
+		committed := func() bool {
+			n, ok := c.countTitled(tab, strings.TrimSpace(title))
+			if !sameOK || !ok {
+				return evalBool(tab, rowWithAria, strings.TrimSpace(title)) && sameBefore == 0
 			}
-			if !ok {
-				return map[string]any{"error": "could not find the new-reminder control"}, nil
+			return n > sameBefore
+		}
+		grown := func() int {
+			n, ok := c.countTitled(tab, placeholderTitle)
+			if !baseOK || !ok {
+				return 0 // unknown is never read as a row of ours
 			}
-			sleep(1800)
-			_, _ = tab.Eval(scrollEnd, nil)
-			sleep(1200)
-			var spot struct {
-				X     int    `json:"x"`
-				Y     int    `json:"y"`
-				Error string `json:"error"`
+			return n - baseline
+		}
+		for attempt := 0; attempt < 3 && !typed; attempt++ {
+			var want any
+			if !evalBool(tab, focusEmptyRow, nil) {
+				if grown() > 0 {
+					want = placeholderTitle
+				} else {
+					ok, err := tab.PointerClick("rm-new-reminder", 0)
+					if err != nil {
+						return nil, err
+					}
+					if !ok {
+						return map[string]any{"error": "could not find the new-reminder control"}, nil
+					}
+					sleep(2000)
+				}
 			}
-			if err := tab.EvalJSON(focusNewRow, nil, &spot); err != nil {
-				return nil, err
-			}
-			if spot.Error != "" {
-				if attempt == 0 {
+			if want != nil {
+				if !evalBool(tab, focusRowTitled, want) {
 					continue
 				}
-				return map[string]any{"error": "the new row did not appear: " + spot.Error}, nil
+				_ = tab.KeyCombo("a")
+				sleep(300)
+			} else if !evalBool(tab, focusInRow, nil) && !evalBool(tab, focusEmptyRow, nil) {
+				continue // no row appeared: the next attempt presses + again
 			}
-			focused := false
-			for i := 0; i < 4; i++ {
-				if err := tab.MouseClick(spot.X, spot.Y); err != nil {
-					return nil, err
-				}
-				sleep(900)
-				var finfo struct {
-					Focused bool `json:"focused"`
-				}
-				if err := tab.EvalJSON(focusedTextJS, nil, &finfo); err != nil {
-					return nil, err
-				}
-				if finfo.Focused {
-					focused = true
-					break
-				}
-				if err := tab.EvalJSON(focusNewRow, nil, &spot); err != nil {
-					return nil, err
-				}
-				if spot.Error != "" {
-					break
-				}
-			}
-			if spot.Error != "" {
-				// let the outer attempt loop try again from the add control
-				var fcheck struct {
-					Focused bool `json:"focused"`
-				}
-				if err := tab.EvalJSON(focusedTextJS, nil, &fcheck); err != nil {
-					return nil, err
-				}
-				_ = fcheck
-				continue
-			}
-			if !focused {
-				continue
-			}
-			if err := tab.TypeText(title); err != nil {
+			if err := tab.TypeText(strings.TrimSpace(title)); err != nil {
 				return nil, err
 			}
 			sleep(500)
-			held := ""
-			var heldInfo struct {
-				Text string `json:"text"`
-			}
-			if err := tab.EvalJSON(focusedTextJS, nil, &heldInfo); err == nil {
-				held = heldInfo.Text
-			}
-			if !strings.Contains(held, strings.TrimSpace(title)) {
-				_ = tab.Key("Escape", 0)
-				sleep(800)
-				continue
-			}
-			// Tab, not Enter: Enter commits the row and opens another,
-			// leaving a stray "New Reminder" behind every time.
 			_ = tab.Key("Tab", 0)
-			sleep(4000)
-			_, _ = tab.Eval(scrollEnd, nil)
-			sleep(1500)
-			all, err := c.items(tab)
-			if err != nil {
-				return nil, err
+			for i := 0; i < 8 && !typed; i++ {
+				sleep(1000)
+				typed = committed()
 			}
+		}
+		if all, err := c.items(tab); err == nil {
 			after = nil
 			for _, r := range all {
 				if t, _ := r["title"].(string); t != "" {
 					after = append(after, t)
 				}
 			}
-			found := false
-			for _, t := range after {
-				if t == strings.TrimSpace(title) {
-					found = true
-				}
-			}
-			if found {
-				typed = true
-				break
-			}
-			_ = tab.DismissAlert()
-			_ = tab.Key("Escape", 0)
-			sleep(1000)
 		}
 		if !typed {
 			ten := after
 			if len(ten) > 10 {
 				ten = ten[:10]
 			}
-			return map[string]any{"error": "the reminder was typed but did not appear in the list; nothing is claimed as created",
-				"list_now": ten}, nil
+			out := map[string]any{"error": "the reminder was typed but did not appear in the list; nothing is claimed as created",
+				"list_now": ten}
+			if n := grown(); n > 0 {
+				out["left_behind"] = fmt.Sprintf("%d blank %q row(s) this call could not retitle; tell the owner, who can delete them in the app", n, placeholderTitle)
+			}
+			return out, nil
 		}
 		result := map[string]any{"created": true, "list": listName, "title": strings.TrimSpace(title)}
 		if !when.IsZero() {
@@ -1651,4 +1666,23 @@ func runClient(cfg *config.Config, fn func(*Client) (map[string]any, error)) (*m
 		return mcp.NewToolResultError(shortError(err)), nil
 	}
 	return mcpserver.ResultJSON(out)
+}
+
+// placeholderTitle is what the app names a new row committed without a title.
+const placeholderTitle = "New Reminder"
+
+// countTitled counts the rows in the list titled exactly title, from the
+// page itself after scrolling to the end so the virtualised list has
+// rendered them; ok is false when the page could not be read.
+func (c *Client) countTitled(tab *browser.Tab, title string) (int, bool) {
+	_, _ = tab.Eval(scrollEnd, nil)
+	raw, err := tab.Eval(countAria, title)
+	if err != nil {
+		return 0, false
+	}
+	var n int
+	if err := json.Unmarshal(raw, &n); err != nil {
+		return 0, false
+	}
+	return n, true
 }

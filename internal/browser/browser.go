@@ -84,6 +84,8 @@ type Target struct {
 	ID   string `json:"id"`
 	Type string `json:"type"`
 	URL  string `json:"url"`
+
+	WebSocketDebuggerURL string `json:"webSocketDebuggerUrl"`
 }
 
 // CDP speaks the DevTools HTTP endpoints. No driver library: these calls
@@ -144,4 +146,22 @@ func (c *CDP) DebuggerURL() (string, error) {
 		return "", fmt.Errorf("CDP /json/version has no debugger URL")
 	}
 	return version.WebSocketDebuggerURL, nil
+}
+
+// NewTarget opens a tab on url.
+func (c *CDP) NewTarget(url string) (Target, error) {
+	var tg Target
+	req, err := http.NewRequest(http.MethodPut, c.BaseURL+"/json/new?"+url, nil)
+	if err != nil {
+		return tg, err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return tg, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return tg, fmt.Errorf("CDP new tab: %s", resp.Status)
+	}
+	return tg, json.NewDecoder(resp.Body).Decode(&tg)
 }

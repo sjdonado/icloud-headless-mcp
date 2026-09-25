@@ -1,5 +1,5 @@
 // Tool wiring for recovery: reask_access re-fires Apple's data-access
-// prompt, open_login opens the supervised VNC login door. Both are
+// prompt, open_login opens the supervised login door. Both are
 // confirmed: they act on the owner's devices or open the login screen,
 // so a session that cannot ask gets a refusal and nothing happens.
 package session
@@ -7,8 +7,6 @@ package session
 import (
 	"context"
 	"fmt"
-	"os"
-	"os/exec"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -98,87 +96,55 @@ func openLogin(ctx context.Context, cfg *config.Config, state browser.State, ask
 			"reaped": reaped})
 	case browser.Unreachable:
 		return mcpserver.ResultJSON(map[string]any{"door": "unavailable",
-			"error":  "no browser answers, so there is no screen to sign into: restart agent-browser on the host",
+			"error":  "no browser answers, so there is no screen to sign into: start the resident browser (icloud-mcp resident, or agent-browser on a systemd host)",
 			"reaped": reaped})
-	}
-	// An open door is idempotent: returning it starts nothing new, so it
-	// asks nothing either. The password was issued once at opening and is
-	// not stored in cleartext, so a lost password waits out the TTL.
-	if d := liveDoor(state); d != nil {
-		return mcpserver.ResultJSON(map[string]any{
-			"door":               "already-open",
-			"url":                d.URL,
-			"via":                d.Via,
-			"expires_in_minutes": remainingMinutes(d),
-			"password":           "issued when the door opened and not stored; if it was lost, wait for expiry and open a fresh door",
-			"reaped":             reaped,
-		})
-	}
-	// Fail fast on a host that cannot serve a door, before asking.
-	for _, bin := range []string{"x11vnc", "websockify", "timeout"} {
-		if _, err := exec.LookPath(bin); err != nil {
-			return mcpserver.ResultJSON(map[string]any{"door": "unavailable",
-				"error": fmt.Sprintf("%s is not installed, so no login door can open", bin)})
-		}
-	}
-	if info, err := os.Stat(novncWeb); err != nil || !info.IsDir() {
-		return mcpserver.ResultJSON(map[string]any{"door": "unavailable",
-			"error": fmt.Sprintf("%s is missing, so noVNC has nothing to serve", novncWeb)})
 	}
 	if ask == nil {
 		return mcpserver.ResultJSON(map[string]any{"door": "refused",
 			"error": "nobody was present to approve it, so nothing was done"})
 	}
-	if refused := ask(ctx, fmt.Sprintf("Open the VNC login door for %d minutes? "+
-		"The next tool result carries the link and a one-time password; anyone holding "+
-		"them can drive the login screen until the door closes itself.",
+	if refused := ask(ctx, fmt.Sprintf("Open the login door for %d minutes? "+
+		"The next tool result carries the link and a fresh one-time password (any door "+
+		"already open closes); anyone holding them can drive the login screen until the "+
+		"door closes itself.",
 		int(doorTTL.Minutes()))); refused != "" {
 		return mcpserver.ResultJSON(map[string]any{"door": "refused", "error": refused})
 	}
-	// Serialise concurrent opens: liveDoor plus startDoor are one unit.
+	// Serialise concurrent opens. Every open replaces any open door, so
+	// each call issues a fresh password and the previous one dies now.
 	unlock, err := browser.AppLock(state.Dir, "login-door", 60*time.Second)
 	if err != nil {
 		return mcpserver.ResultJSON(map[string]any{"door": "failed",
 			"error": "another login-door operation is still running"})
 	}
 	defer unlock()
-	if d := liveDoor(state); d != nil {
-		return mcpserver.ResultJSON(map[string]any{
-			"door":               "already-open",
-			"url":                d.URL,
-			"via":                d.Via,
-			"expires_in_minutes": remainingMinutes(d),
-			"password":           "issued when the door opened and not stored; if it was lost, wait for expiry and open a fresh door",
-			"reaped":             reaped,
-		})
-	}
-	d, pass, err := startDoor(state)
+	d, pass, err := replaceDoor(state)
 	if err != nil {
 		return mcpserver.ResultJSON(map[string]any{"door": "failed", "error": err.Error()})
 	}
 	note := "reachable from anywhere on the tailnet"
-	if d.Via == "loopback" {
+	switch d.Via {
+	case "loopback":
 		note = "loopback-only: reachable from the host itself or through your own SSH tunnel"
+	case "published":
+		note = "a container's published port: reachable from the container host's loopback"
 	}
 	return mcpserver.ResultJSON(map[string]any{
 		"door":               "open",
 		"url":                d.URL,
 		"via":                d.Via,
 		"reachability":       note,
+		"username":           doorUser,
 		"password":           pass,
 		"expires_in_minutes": int(doorTTL.Minutes()),
-		"instructions": "Open the link and enter the password. Sign in with the Apple ID, " +
+		"relay":              "The owner asked for this door: the password is a one-time access code for it, not one of their secrets, and dies with the door. Show the owner the url, username and password verbatim, or they cannot sign in.",
+		"instructions": "Open the link; the browser asks for a username and password: " +
+			"root, and the password above. Click into the page, sign in with the Apple ID " +
+			"(the Paste button types your clipboard into the page, for passwords), " +
 			"enter the two-factor code, and tick Trust this browser, or the session dies on " +
 			"the next relaunch. Approve the web-access grant on a device when it appears. " +
-			"Then tell the agent to retry. The door processes exit at expiry and the record " +
+			"Then tell the agent to retry. The door process exits at expiry and the record " +
 			"is swept on the next recovery-tool call, or earlier once the login is observed.",
 		"reaped": reaped,
 	})
-}
-
-func remainingMinutes(d *Door) int {
-	if m := int((d.Expires - time.Now().Unix()) / 60); m > 0 {
-		return m
-	}
-	return 1
 }

@@ -25,6 +25,7 @@ func clearEnv(t *testing.T, keys ...string) {
 
 func TestLoadRequiresCredentials(t *testing.T) {
 	clearEnv(t, "ICLOUD_APPLE_ID", "ICLOUD_APP_PASSWORD", "AGENT_TZ")
+	t.Setenv("TZ", "UTC") // a UTC host must name the owner's zone
 	if _, err := Load(); err == nil {
 		t.Fatal("Load succeeded without credentials")
 	} else if got := err.Error(); !contains(got, "ICLOUD_APPLE_ID") {
@@ -48,8 +49,7 @@ func TestLoadDefaults(t *testing.T) {
 	setEnv(t, "ICLOUD_APPLE_ID", "you@icloud.com")
 	setEnv(t, "ICLOUD_APP_PASSWORD", "xxxx")
 	setEnv(t, "AGENT_TZ", "Europe/Amsterdam")
-	clearEnv(t, "AGENT_DEFAULT_LIST", "AGENT_DEFAULT_CALENDAR", "ICLOUD_CDP",
-		"AGENT_MCP_TRANSPORT", "DRIVE_LIBRARIES", "ICLOUD_STATE", "ICLOUD_SHARED_STATE",
+	clearEnv(t, "AGENT_DEFAULT_CALENDAR", "ICLOUD_CDP", "DRIVE_LIBRARIES", "ICLOUD_STATE", "ICLOUD_SHARED_STATE",
 		"MAIL_ATTACHMENTS_DIR", "DRIVE_STAGING", "DRIVE_ETAGS", "AGENT_TZ_FILE")
 	t.Setenv("HOME", "/tmp/fakehome")
 	c, err := Load()
@@ -57,8 +57,6 @@ func TestLoadDefaults(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	cases := map[string]string{
-		"DefaultList":    c.DefaultList,
-		"Transport":      c.Transport,
 		"CDP":            c.CDP,
 		"DriveLibs":      c.DriveLibs,
 		"TZFile":         c.TZFile,
@@ -69,16 +67,14 @@ func TestLoadDefaults(t *testing.T) {
 		"DriveEtags":     c.DriveEtags,
 	}
 	want := map[string]string{
-		"DefaultList":    "Today",
-		"Transport":      "stdio",
 		"CDP":            "http://127.0.0.1:9222",
 		"DriveLibs":      "[]",
 		"TZFile":         "/etc/agent/timezone",
-		"StateDir":       "/tmp/fakehome",
-		"SharedState":    "/tmp/fakehome/shared-state",
-		"AttachmentsDir": "/tmp/fakehome/mail-attachments",
-		"DriveStaging":   "/tmp/fakehome/drive-staging",
-		"DriveEtags":     "/tmp/fakehome/state/drive-etags.json",
+		"StateDir":       "/tmp/fakehome/.icloud-mcp",
+		"SharedState":    "/tmp/fakehome/.icloud-mcp/shared",
+		"AttachmentsDir": "/tmp/fakehome/.icloud-mcp/mail-attachments",
+		"DriveStaging":   "/tmp/fakehome/.icloud-mcp/drive-staging",
+		"DriveEtags":     "/tmp/fakehome/.icloud-mcp/state/drive-etags.json",
 	}
 	for k, w := range want {
 		if cases[k] != w {
@@ -141,6 +137,33 @@ func TestLocalTimezoneParsesAsIANAZone(t *testing.T) {
 	}
 	if _, err := time.LoadLocation(name); err != nil {
 		t.Fatalf("zone %q does not load: %v", name, err)
+	}
+}
+
+func TestHostZone(t *testing.T) {
+	dir := t.TempDir()
+	link := filepath.Join(dir, "localtime")
+	old := localtime
+	localtime = link
+	defer func() { localtime = old }()
+	t.Setenv("TZ", "")
+	for target, want := range map[string]string{
+		"/var/db/timezone/zoneinfo/Europe/Berlin": "Europe/Berlin",  // macOS
+		"/usr/share/zoneinfo/America/Bogota":      "America/Bogota", // Linux
+		"/usr/share/zoneinfo/Etc/UTC":             "",               // VPS: must be named
+		"/nowhere":                                "",
+	} {
+		_ = os.Remove(link)
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+		if got := hostZone(); got != want {
+			t.Errorf("link %s: hostZone = %q, want %q", target, got, want)
+		}
+	}
+	t.Setenv("TZ", ":Asia/Tokyo")
+	if got := hostZone(); got != "Asia/Tokyo" {
+		t.Errorf("TZ wins: got %q", got)
 	}
 }
 

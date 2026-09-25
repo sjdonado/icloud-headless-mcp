@@ -1,14 +1,15 @@
 [Unit]
 Description=Resident iCloud browser session
-After=agent-xvfb.service
-Requires=agent-xvfb.service
+After=network.target
 
 [Service]
 User=agent-icloud
 Group=agent-icloud
 WorkingDirectory=/opt/agent-icloud
-Environment=DISPLAY=:99
 Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
+# The worked example keeps state in the account home, not the $HOME/.icloud-mcp default.
+Environment=ICLOUD_STATE=/opt/agent-icloud
+Environment=ICLOUD_SHARED_STATE=/opt/agent-icloud/shared-state
 ExecStart=/opt/agent-icloud/bin/icloud-mcp resident
 # Restart after a crash. The resident does not warm application pages at startup, so a restart
 # does not itself trigger Apple's data-access prompt.

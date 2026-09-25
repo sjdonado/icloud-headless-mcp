@@ -1,5 +1,5 @@
 // Package session owns recovery: re-firing Apple's data-access prompt and
-// opening the supervised VNC login door. Both run behind confirmed tools
+// opening the supervised login door. Both run behind confirmed tools
 // and both reap expired login doors on entry; the reask and login
 // subcommands delegate to the same cores.
 package session

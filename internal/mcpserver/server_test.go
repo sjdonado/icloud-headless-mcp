@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -288,5 +291,74 @@ func TestElicitationErrorFailsClosed(t *testing.T) {
 	}
 	if _, executed := out["status"]; executed {
 		t.Fatalf("failed-closed call executed: %v", out)
+	}
+}
+
+// TestToolSchemasDeclareArguments guards the empty-schema regression: a
+// client that sees no properties cannot call create_event at all.
+func TestToolSchemasDeclareArguments(t *testing.T) {
+	names := map[string]bool{}
+	for _, def := range Tools {
+		names[def.Name] = true
+	}
+	for name := range ToolParams {
+		if !names[name] {
+			t.Errorf("ToolParams names %q, which is not a registered tool", name)
+		}
+	}
+	s := New()
+	tool := s.GetTool("create_event")
+	if tool == nil {
+		t.Fatal("create_event is not registered")
+	}
+	required := map[string]bool{}
+	for _, r := range tool.Tool.InputSchema.Required {
+		required[r] = true
+	}
+	if !required["summary"] || !required["start"] {
+		t.Fatalf("create_event schema requires %v, want summary and start", tool.Tool.InputSchema.Required)
+	}
+	if _, ok := tool.Tool.InputSchema.Properties["calendar"]; !ok {
+		t.Fatal("create_event schema lacks the optional calendar property")
+	}
+}
+
+// TestEveryHandlerArgumentIsDeclared scans the tool handlers for the
+// arguments they read and requires each one in ToolParams. The schema is
+// the only way a client learns an argument exists, so an undeclared one
+// is a feature nobody can use (since/until on list_mail went unseen).
+func TestEveryHandlerArgumentIsDeclared(t *testing.T) {
+	declared := map[string]bool{}
+	for _, params := range ToolParams {
+		for _, p := range params {
+			declared[p.Name] = true
+		}
+	}
+	single := regexp.MustCompile(`args\.[A-Za-z]+\("([a-z_]+)"`)
+	multi := regexp.MustCompile(`args\.OptAll\(([^)]*)\)`)
+	name := regexp.MustCompile(`"([a-z_]+)"`)
+	files, _ := filepath.Glob("../*/*.go")
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") || strings.Contains(f, "mcpserver") {
+			continue
+		}
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var used []string
+		for _, m := range single.FindAllStringSubmatch(string(raw), -1) {
+			used = append(used, m[1])
+		}
+		for _, m := range multi.FindAllStringSubmatch(string(raw), -1) {
+			for _, n := range name.FindAllStringSubmatch(m[1], -1) {
+				used = append(used, n[1])
+			}
+		}
+		for _, u := range used {
+			if !declared[u] {
+				t.Errorf("%s reads argument %q, which no tool declares in ToolParams", f, u)
+			}
+		}
 	}
 }

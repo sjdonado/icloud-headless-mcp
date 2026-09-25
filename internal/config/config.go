@@ -17,18 +17,16 @@ import (
 type Config struct {
 	AppleID        string // ICLOUD_APPLE_ID (required)
 	AppPassword    string // ICLOUD_APP_PASSWORD (required)
-	AgentTZ        string // AGENT_TZ (required as fallback; see LocalTimezone)
+	AgentTZ        string // AGENT_TZ, default the host's zone unless that is UTC (see Load)
 	TZFile         string // AGENT_TZ_FILE, default /etc/agent/timezone
-	DefaultList    string // AGENT_DEFAULT_LIST, default "Today"
 	DefaultCal     string // AGENT_DEFAULT_CALENDAR, default ""
-	StateDir       string // ICLOUD_STATE, default $HOME
-	SharedState    string // ICLOUD_SHARED_STATE, default $HOME/shared-state
+	StateDir       string // ICLOUD_STATE, default $HOME/.icloud-mcp
+	SharedState    string // ICLOUD_SHARED_STATE, default $ICLOUD_STATE/shared
 	CDP            string // ICLOUD_CDP, default http://127.0.0.1:9222
-	AttachmentsDir string // MAIL_ATTACHMENTS_DIR, default $HOME/mail-attachments
+	AttachmentsDir string // MAIL_ATTACHMENTS_DIR, default $ICLOUD_STATE/mail-attachments
 	DriveStaging   string // DRIVE_STAGING, default $ICLOUD_STATE/drive-staging
 	DriveEtags     string // DRIVE_ETAGS, default $ICLOUD_STATE/state/drive-etags.json
 	DriveLibs      string // DRIVE_LIBRARIES, default "[]"
-	Transport      string // AGENT_MCP_TRANSPORT, default "stdio"
 	HealthDB       string // HEALTH_DB, default $ICLOUD_STATE/state/health.sqlite. Owned exclusively by this service account: the extension's importer is its sole writer, so never point it at another uid's live store; adopting one means copying it into place (operator, manual migrate).
 	HealthExport   string // HEALTH_EXPORT_DIR, default "" (extension off)
 }
@@ -50,10 +48,14 @@ func Load() (*Config, error) {
 	if c.AppPassword == "" {
 		return nil, fmt.Errorf("missing required environment: ICLOUD_APP_PASSWORD")
 	}
-	// Required even when the TZ file would suffice: a zone guessed later
-	// types the wrong hour into an Apple picker and nothing errors.
+	// A laptop's own zone is its owner's zone, so it is the default. A
+	// server's usually is not: a host on UTC (the VPS case) or one whose
+	// zone cannot be read must name the owner's zone, because a zone
+	// guessed here types the wrong hour into an Apple picker and nothing
+	// errors.
 	if c.AgentTZ == "" {
-		return nil, fmt.Errorf("missing required environment: AGENT_TZ")
+		return nil, fmt.Errorf("missing required environment: AGENT_TZ (the host's zone " +
+			"is UTC or unreadable, so name the owner's IANA zone, e.g. Europe/Amsterdam)")
 	}
 	return c, nil
 }
@@ -67,19 +69,17 @@ func LoadEnv() *Config {
 		home = ""
 	}
 	c := &Config{
-		AppleID:        os.Getenv("ICLOUD_APPLE_ID"),
-		AppPassword:    os.Getenv("ICLOUD_APP_PASSWORD"),
-		AgentTZ:        os.Getenv("AGENT_TZ"),
-		TZFile:         getenv("AGENT_TZ_FILE", "/etc/agent/timezone"),
-		DefaultList:    getenv("AGENT_DEFAULT_LIST", "Today"),
-		DefaultCal:     os.Getenv("AGENT_DEFAULT_CALENDAR"),
-		StateDir:       getenv("ICLOUD_STATE", home),
-		SharedState:    getenv("ICLOUD_SHARED_STATE", filepath.Join(home, "shared-state")),
-		CDP:            getenv("ICLOUD_CDP", "http://127.0.0.1:9222"),
-		AttachmentsDir: getenv("MAIL_ATTACHMENTS_DIR", filepath.Join(home, "mail-attachments")),
-		DriveLibs:      getenv("DRIVE_LIBRARIES", "[]"),
-		Transport:      getenv("AGENT_MCP_TRANSPORT", "stdio"),
+		AppleID:     os.Getenv("ICLOUD_APPLE_ID"),
+		AppPassword: os.Getenv("ICLOUD_APP_PASSWORD"),
+		AgentTZ:     getenv("AGENT_TZ", hostZone()),
+		TZFile:      getenv("AGENT_TZ_FILE", "/etc/agent/timezone"),
+		DefaultCal:  os.Getenv("AGENT_DEFAULT_CALENDAR"),
+		StateDir:    getenv("ICLOUD_STATE", filepath.Join(home, ".icloud-mcp")),
+		CDP:         getenv("ICLOUD_CDP", "http://127.0.0.1:9222"),
+		DriveLibs:   getenv("DRIVE_LIBRARIES", "[]"),
 	}
+	c.SharedState = getenv("ICLOUD_SHARED_STATE", filepath.Join(c.StateDir, "shared"))
+	c.AttachmentsDir = getenv("MAIL_ATTACHMENTS_DIR", filepath.Join(c.StateDir, "mail-attachments"))
 	c.DriveStaging = getenv("DRIVE_STAGING", filepath.Join(c.StateDir, "drive-staging"))
 	c.DriveEtags = getenv("DRIVE_ETAGS", filepath.Join(c.StateDir, "state", "drive-etags.json"))
 	c.HealthDB = getenv("HEALTH_DB", filepath.Join(c.StateDir, "state", "health.sqlite"))
@@ -112,4 +112,27 @@ func (c *Config) LocalTimezone() (string, error) {
 			"unset, so nothing here can say what a wall-clock time means", c.TZFile)
 	}
 	return c.AgentTZ, nil
+}
+
+// localtime is the host's zone link. A variable so tests can point it at
+// a fixture.
+var localtime = "/etc/localtime"
+
+// hostZone is the host's IANA zone name from TZ or the /etc/localtime
+// link (both macOS and Linux keep it under a zoneinfo directory), or ""
+// when it is UTC or cannot be read.
+func hostZone() string {
+	name := strings.TrimPrefix(os.Getenv("TZ"), ":")
+	if name == "" {
+		target, err := os.Readlink(localtime)
+		if err != nil {
+			return ""
+		}
+		_, name, _ = strings.Cut(target, "zoneinfo/")
+	}
+	switch name {
+	case "", "UTC", "Etc/UTC", "Etc/UCT", "UCT", "GMT", "Etc/GMT", "Universal", "Zulu":
+		return ""
+	}
+	return name
 }

@@ -6,8 +6,9 @@
 //
 //	serve          the MCP server (default when no subcommand is given)
 //	session-check  report whether the resident browser reaches iCloud data
-//	resident       the resident headed Chromium holding the iCloud session
-//	login          interactive first-login bootstrap over VNC
+//	resident       the resident headless Chromium holding the iCloud session
+//	login          first login: opens the login door and prints its link
+//	door           the login door process (started by open_login and login)
 //	reask          re-ask Apple for web access by re-navigating, not restarting
 //	drain          run the writes deferred while the grant had lapsed
 //	tab-reaper     close app tabs idle longer than N minutes (default 15)
@@ -27,6 +28,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"time"
 
 	"github.com/mark3labs/mcp-go/server"
 
@@ -51,8 +53,10 @@ No subcommand serves the MCP server over stdio.
 Subcommands:
   serve            serve the MCP server over stdio (the default)
   session-check    exit 0 healthy, 1 signed out, 2 no browser, 3 needs approval
-  resident         run the resident headed Chromium holding the session
-  login            interactive first-login bootstrap (VNC + 2FA)
+  resident         run the resident headless Chromium holding the session
+  login            first login: open the login door, print its link
+  door HOST:PORT TTL PASSFILE
+                   the login door process (open_login and login start it)
   reask            re-ask Apple for web access without restarting the browser
   drain [--report-only]
                    run the writes deferred while the grant had lapsed
@@ -76,6 +80,7 @@ var subcommands = map[string]func([]string) int{
 	"session-check": func([]string) int { return runSessionCheck() },
 	"resident":      func([]string) int { return runResident() },
 	"login":         func([]string) int { return runLogin() },
+	"door":          func(args []string) int { return runDoor(args) },
 	"reask":         func([]string) int { return runReask() },
 	"drain":         func(args []string) int { return runDrain(args) },
 	"tab-reaper":    func(args []string) int { return runTabReaper(args) },
@@ -108,6 +113,14 @@ func runServe() {
 	if err != nil {
 		log.Fatalf("bad environment: %v", err)
 	}
+	// Start the resident now, and again whenever it has gone: a browser
+	// that dies while the agent runs must not stay dead until a restart.
+	go func() {
+		for {
+			ensureResident(cfg)
+			time.Sleep(30 * time.Second)
+		}
+	}()
 	var srv *server.MCPServer
 	ask := func(ctx context.Context, question string) string {
 		return mcpserver.AskApproval(ctx, srv, question)
@@ -135,11 +148,6 @@ func runServe() {
 		handlers[name] = h
 	}
 	srv = mcpserver.NewWithHandlers(handlers)
-	if os.Getenv("AGENT_MCP_TRANSPORT") == "streamable-http" {
-		httpServer := server.NewStreamableHTTPServer(srv)
-		log.Fatal(httpServer.Start("127.0.0.1:8899"))
-		return
-	}
 	if err := server.ServeStdio(srv); err != nil {
 		log.Fatalf("server error: %v", err)
 	}

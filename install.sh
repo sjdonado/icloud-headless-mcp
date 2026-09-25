@@ -59,8 +59,7 @@ SRC="$tmp/${TARBALL%.tar.gz}"
 id "$ACCOUNT" >/dev/null 2>&1 || useradd -r -m -d "$PREFIX" -s /usr/sbin/nologin "$ACCOUNT"
 install -d -o "$ACCOUNT" -g "$ACCOUNT" -m 700 "$PREFIX/bin"
 install -o "$ACCOUNT" -g "$ACCOUNT" -m 755 -t "$PREFIX/bin" \
-  "$SRC/bin/icloud-mcp" "$SRC/bin/stdio.sh" \
-  "$SRC/bin/agent-reask-access" "$SRC/bin/icloud-login.sh"
+  "$SRC/bin/icloud-mcp" "$SRC/bin/stdio.sh" "$SRC/bin/icloud-mcp-host" "$SRC/bin/agent-reask-access"
 install -o root -g root -m 700 "$SRC/bin/agent-reask-access" /usr/local/bin/agent-reask-access
 install -o root -g root -m 440 "$SRC/sudoers.d/agent-icloud" /etc/sudoers.d/agent-icloud
 install -o root -g root -m 440 "$SRC/sudoers.d/agent-browser-restart" /etc/sudoers.d/agent-browser-restart
@@ -70,25 +69,34 @@ install -o root -g root -m 644 -t /etc/systemd/system "$SRC"/systemd/*
 if [ ! -f /etc/agent/icloud.env ]; then
   install -d -o root -g root -m 755 /etc/agent
   install -o "$ACCOUNT" -g "$ACCOUNT" -m 400 "$SRC/.env.example" /etc/agent/icloud.env
-  echo "wrote a blank env file to /etc/agent/icloud.env: fill in the Apple ID, app-specific password, and AGENT_TZ before the login step"
+  echo "wrote a blank env file to /etc/agent/icloud.env: fill in the Apple ID and app-specific password (and AGENT_TZ on a UTC host)"
 fi
 
-# The browser stack the units assume: virtual display, loopback VNC for the
-# one interactive login, and a headed Chromium for the resident.
-if command -v apt-get >/dev/null 2>&1; then
-  apt-get update
-  apt-get install -y xvfb x11vnc novnc websockify
-  if [ -z "${CHROMIUM_BIN:-}" ] && ! command -v chromium >/dev/null 2>&1 && ! command -v chromium-browser >/dev/null 2>&1 && ! command -v google-chrome >/dev/null 2>&1; then
+# The only browser dependency: a system Chromium, run headless. No display,
+# no VNC: the login door streams the headless browser itself.
+if [ -z "${CHROMIUM_BIN:-}" ] && ! command -v chromium >/dev/null 2>&1 && ! command -v chromium-browser >/dev/null 2>&1 && ! command -v google-chrome >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update
     apt-get install -y chromium
+  else
+    echo "install a system Chromium (or set CHROMIUM_BIN), then re-run" >&2
+    exit 1
   fi
-elif ! command -v Xvfb >/dev/null 2>&1 || ! command -v x11vnc >/dev/null 2>&1 || { ! command -v chromium >/dev/null 2>&1 && ! command -v chromium-browser >/dev/null 2>&1 && ! command -v google-chrome >/dev/null 2>&1 && [ -z "${CHROMIUM_BIN:-}" ]; }; then
-  echo "install xvfb, a VNC server, and a system Chromium (or set CHROMIUM_BIN), then re-run" >&2
-  exit 1
 fi
+
+# Upgrades from the X-display era: the virtual display, VNC and noVNC units
+# are gone. Stopping the display ends a headed browser, and systemd brings
+# agent-browser straight back headless on the same profile.
+for unit in agent-novnc agent-vnc agent-xvfb; do
+  systemctl disable --now "$unit" >/dev/null 2>&1 || true
+  rm -f "/etc/systemd/system/$unit.service"
+done
+rm -f "$PREFIX/bin/icloud-login.sh"
 
 systemctl daemon-reload
-systemctl enable --now agent-xvfb agent-browser agent-tab-reaper.timer
+systemctl enable --now agent-browser agent-tab-reaper.timer
 
-echo "installed $("$PREFIX/bin/icloud-mcp" version). Next, README's interactive bootstrap:"
-echo "  sudo -u $ACCOUNT -H $PREFIX/bin/icloud-login.sh"
-echo "then point the agent runtime at: sudo -n -u $ACCOUNT $PREFIX/bin/stdio.sh"
+echo "installed $("$PREFIX/bin/icloud-mcp" version)."
+echo "Point the agent runtime at: sudo -n -u $ACCOUNT $PREFIX/bin/stdio.sh"
+echo "The first call that needs iCloud asks to open the login door; or sign in now with:"
+echo "  sudo -u $ACCOUNT -H $PREFIX/bin/icloud-mcp-host login"

@@ -5,4 +5,7 @@ Description=Import the staged Apple Health export into SQLite
 Type=oneshot
 User=agent-icloud
 Group=agent-icloud
+# The worked example keeps state in the account home, not the $HOME/.icloud-mcp default.
+Environment=ICLOUD_STATE=/opt/agent-icloud
+Environment=ICLOUD_SHARED_STATE=/opt/agent-icloud/shared-state
 ExecStart=/opt/agent-icloud/bin/icloud-mcp health-import
