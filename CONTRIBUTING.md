@@ -4,9 +4,10 @@ Thanks for looking. This project drives a real, logged-in Apple account, so a fe
 
 ## Before you start
 
-- **Never commit a credential or session artefact.** `.env`, `cookies.json`, `state.json`, `*.vncpass`, any SQLite store and any browser profile are gitignored, and that is not an invitation to find a way around it. If one lands in a commit by accident, treat the account as compromised: revoke the app-specific password, sign the session out from an Apple device, and rebuild the profile.
+- **Never commit a credential or session artefact.** `.env`, `.state/`, `cookies.json`, `state.json`, any SQLite store and any browser profile are gitignored, and that is not an invitation to find a way around it. If one lands in a commit by accident, treat the account as compromised: revoke the app-specific password, sign the session out from an Apple device, and rebuild the profile.
 - **Do not widen the sudoers rules.** Each rule names one exact command with no variable argument, which is what keeps the containment shape reviewable. A rule granting `systemctl`, a shell, or a command with a free argument hands the caller the whole service.
-- **Do not restart the browser to make something work.** Restarting `agent-browser`, `agent-xvfb`, `agent-vnc` or `agent-novnc` discards the warm session and costs the owner a device approval. A navigation is usually enough, and it leaves the browser standing.
+- **Do not restart the browser to make something work.** Restarting the resident discards the warm tabs and can cost the owner a device approval. A navigation is usually enough, and it leaves the browser standing.
+- **Do not widen the login door.** It forwards input events only, needs the owner's approval, binds Tailscale or loopback, and dies at 20 minutes or on sign-in. [`SECURITY.md`](SECURITY.md) lists what must stay true.
 
 ## Checks
 
@@ -28,6 +29,10 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -buildvcs=false -o /dev
 ```
 
 Keep the build `CGO_ENABLED=0`. A dependency that needs cgo ends the static cross-compiled build, which is the whole deployment story.
+
+## Running it for real
+
+From a checkout, `./local.sh` is the server against your own account: it sources `.env` (copy `.env.example`, two keys), keeps every piece of state in `.state/`, rebuilds the binary, and starts a headless Chrome when none is running. Point any MCP client at the absolute path of `./local.sh`. `./local.sh login` prints a login-door link, and `./local.sh session-check` reports the session. Both `.env` and `.state/` are gitignored.
 
 ## Things that bite
 
