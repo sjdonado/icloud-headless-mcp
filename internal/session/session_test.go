@@ -111,6 +111,13 @@ func startNamed(t *testing.T, argv0 string) *exec.Cmd {
 		_ = cmd.Process.Kill()
 		_, _ = cmd.Process.Wait()
 	})
+	// Wait out the fork-to-exec window, where /proc/PID/cmdline reads empty
+	// and the fixture would not yet look like the process it stands in for.
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if raw, ok := cmdline(cmd.Process.Pid); !ok || strings.Contains(raw, argv0) {
+			break
+		}
+	}
 	return cmd
 }
 
