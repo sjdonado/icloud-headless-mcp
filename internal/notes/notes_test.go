@@ -66,6 +66,12 @@ func TestSameTitle(t *testing.T) {
 	if sameTitle("Groceries", "Dentist at noon") {
 		t.Error("different titles must not match")
 	}
+	if sameTitle("[icloud-mcp verify] 20260925-1125", "[icloud-mcp verify] 20260925-1132-probe2") {
+		t.Fatal("a shared prefix is not the same title")
+	}
+	if !sameTitle("Groceries", "  groceries ") {
+		t.Fatal("case and spacing do not change a title")
+	}
 	if sameTitle("", "Anything") {
 		t.Error("empty row must not match")
 	}

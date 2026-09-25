@@ -1,92 +1,77 @@
-// Subcommand login (icloud-mcp login) runs the interactive first-login
-// bootstrap: a headed Chromium on the persisted profile, waiting up to 20
-// minutes for the owner to sign in through VNC and complete 2FA. Tick
-// "Trust this browser" when Apple offers it, or the session dies on the
-// next relaunch.
+// Subcommand login (icloud-mcp login) is the operator's first-login path:
+// it opens the same login door open_login does, onto the running
+// resident, prints the link and one-time password, and waits up to the
+// door's TTL for the owner to sign in and complete 2FA. Tick "Trust this
+// browser" when Apple offers it, or the session dies on the next relaunch.
 package main
 
 import (
 	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/sjdonado/icloud-headless-mcp/internal/browser"
 	"github.com/sjdonado/icloud-headless-mcp/internal/config"
+	"github.com/sjdonado/icloud-headless-mcp/internal/session"
 )
-
-const loginTimeout = 20 * time.Minute
 
 func runLogin() int {
 	cfg := config.LoadEnv()
 	state := browser.State{Dir: cfg.StateDir, Shared: cfg.SharedState, CDP: cfg.CDP}
-	cdpPort := cfg.CDPPort()
-	bin, err := chromiumBinary()
+	cdp := browser.NewCDP(cfg.CDP)
+	switch outcome, _ := cdp.Check(); outcome {
+	case browser.OK:
+		fmt.Println("already signed in")
+		return 0
+	case browser.NeedsApproval:
+		// Signed in already; the grant is reask's job, never a door's.
+		fmt.Println("signed in, waiting for the data-access approval: run `icloud-mcp reask` instead")
+		return 0
+	case browser.Unreachable:
+		fmt.Fprintln(os.Stderr, "no browser answers on", cfg.CDP, "- start `icloud-mcp resident` first")
+		return 2
+	}
+	// Ctrl-C, a kill, or a dropped SSH session closes the door now instead
+	// of at its TTL. Registered before the door opens, so no window leaves
+	// an open door behind.
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	d, pass, closeDoor, err := session.OpenDoor(state)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
-	profile := filepath.Join(cfg.StateDir, "profile")
-	args := []string{
-		"--disable-dev-shm-usage",
-		"--disable-gpu",
-		"--disable-extensions",
-		"--disable-background-networking",
-		"--disable-sync",
-		"--disable-translate",
-		"--no-first-run",
-		fmt.Sprintf("--remote-debugging-port=%d", cdpPort),
-		"--remote-debugging-address=127.0.0.1",
-		"--user-data-dir=" + profile,
-		"--window-size=1280,900",
-		"https://www.icloud.com/",
-	}
-	// Deviation from production, verify-rig shaped: the login browser also
-	// serves loopback CDP, so this command can poll for auth cookies and
-	// the tools (and session-check) can observe the login. Same loopback
-	// exposure as the resident.
-	cmd := exec.Command(bin, args...)
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		fmt.Fprintln(os.Stderr, "cannot start Chromium:", err)
-		return 1
-	}
-	defer func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-	}()
-	fmt.Println("Browser up on the virtual display. Connect over VNC and sign in.")
-	fmt.Println("Tick 'Trust this browser' when Apple offers it. This exits on its own.")
-	cdp := browser.NewCDP(cfg.CDP)
-	deadline := time.Now().Add(loginTimeout)
+	defer closeDoor()
+	deadline := time.Unix(d.Expires, 0)
+	fmt.Printf("Login door open until %s (%s):\n  %s\n  username: root\n  password: %s\n",
+		deadline.Format("15:04"), d.Via, d.URL, pass)
+	fmt.Println("Sign in, enter the 2FA code, tick 'Trust this browser'. This exits on its own.")
 	for time.Now().Before(deadline) {
-		time.Sleep(5 * time.Second)
-		cookies, err := cdp.AllCookies()
-		if err != nil {
+		select {
+		case <-stop:
+			fmt.Println("interrupted, door closed")
+			return 1
+		case <-time.After(5 * time.Second):
+		}
+		outcome, _ := cdp.Check()
+		if outcome != browser.OK && outcome != browser.NeedsApproval {
 			continue
 		}
-		found := 0
-		for _, ck := range cookies {
-			if name, _ := ck["name"].(string); browser.AuthCookieNames[name] {
-				found++
+		time.Sleep(15 * time.Second) // let Apple finish writing cookies
+		if cookies, err := cdp.AllCookies(); err == nil {
+			if n := browser.SaveJar(state, cookies); n > 0 {
+				fmt.Printf("saved %d cookies to the jar\n", n)
 			}
 		}
-		if found >= 2 {
-			fmt.Printf("AUTHENTICATED, %d auth cookies present\n", found)
-			time.Sleep(15 * time.Second) // let Apple finish writing cookies
-			if cookies, err := cdp.AllCookies(); err == nil {
-				if n := browser.SaveJar(state, cookies); n > 0 {
-					fmt.Printf("saved %d cookies to the jar\n", n)
-				}
-			}
-			return 0
+		if outcome == browser.NeedsApproval {
+			fmt.Println("SIGNED IN, waiting for the data-access approval on a device")
+		} else {
+			fmt.Println("AUTHENTICATED")
 		}
+		return 0
 	}
 	fmt.Println("TIMED OUT waiting for sign-in")
-	if cookies, err := cdp.AllCookies(); err == nil {
-		browser.SaveJar(state, cookies)
-	}
 	return 1
 }

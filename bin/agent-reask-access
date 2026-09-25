@@ -8,7 +8,6 @@ set -uo pipefail
 # runuser rather than sudo. This already runs as root, so it is dropping privileges, not gaining
 # them, and sudo is setuid: under the endpoint's NoNewPrivileges=yes it refuses outright with
 # "the no new privileges flag is set". The button led to that error page instead of working.
-exec runuser -u agent-icloud -- \
-  env DISPLAY=:99 PLAYWRIGHT_BROWSERS_PATH=/opt/playwright HOME=/opt/agent-icloud \
-  ICLOUD_STATE=/opt/agent-icloud ICLOUD_SHARED_STATE=/var/lib/icloud-state \
-  /opt/agent-icloud/bin/icloud-mcp reask
+# icloud-mcp-host, the same environment the server runs with: the env file's own paths and CDP
+# address, the worked example's defaults for the rest.
+exec runuser -u agent-icloud -- /opt/agent-icloud/bin/icloud-mcp-host reask

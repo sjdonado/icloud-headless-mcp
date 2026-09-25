@@ -57,6 +57,26 @@ const ClickJS = `([cls, index]) => {
   return true;
 }`
 
+// PointJS finds the nth element with a class token, scrolls it into view,
+// and returns its center, so a caller can click it with a trusted CDP
+// mouse event instead of page-dispatched ones.
+const PointJS = `([cls, index]) => {
+  const found = [];
+  const walk = (root, depth) => {
+    if (depth > 14) return;
+    for (const el of root.querySelectorAll('*')) {
+      if (el.shadowRoot) walk(el.shadowRoot, depth + 1);
+      if ((el.className || '').toString().split(/\s+/).includes(cls)) found.push(el);
+    }
+  };
+  walk(document, 0);
+  const target = found[index];
+  if (!target) return null;
+  target.scrollIntoView({block: 'center'});
+  const box = target.getBoundingClientRect();
+  return {x: Math.round(box.left + box.width / 2), y: Math.round(box.top + box.height / 2)};
+}`
+
 // AlertJS returns the position of a blocking alert's OK button, which is a
 // div.cw-button rather than a button, so tag searches miss it. It returns
 // the position instead of clicking: a synthetic click on one is ignored,
@@ -310,7 +330,7 @@ func (c *wsConn) newTab(url string) (string, error) {
 func (c *wsConn) grantClipboard() error {
 	return c.call("", "Browser.grantPermissions", map[string]any{
 		"origin":      "https://www.icloud.com",
-		"permissions": []string{"clipboardReadWrite"},
+		"permissions": []string{"clipboardReadWrite", "clipboardSanitizedWrite"},
 	}, nil)
 }
 
@@ -324,14 +344,22 @@ func (c *wsConn) setTimezone(session, zone string) {
 
 // MouseClick sends a real pointer click at viewport coordinates.
 func (c *wsConn) mouseClick(session string, x, y int) error {
-	for _, t := range []string{"mouseMoved", "mousePressed", "mouseReleased"} {
-		params := map[string]any{"type": t, "x": x, "y": y, "button": "left", "clickCount": 1}
-		if t == "mouseMoved" {
-			delete(params, "button")
-			delete(params, "clickCount")
-		}
+	// Shaped like a real mouse: hover, press with the left button held
+	// (buttons=1), release (buttons=0), with a beat between. Without the
+	// buttons state and the pauses, the web apps' ui-button and rows took
+	// a click as a bare selection (verified 2026-09-25: the same "+"
+	// ignored the old event shape and added a row with this one).
+	steps := []map[string]any{
+		{"type": "mouseMoved", "x": x, "y": y},
+		{"type": "mousePressed", "x": x, "y": y, "button": "left", "buttons": 1, "clickCount": 1},
+		{"type": "mouseReleased", "x": x, "y": y, "button": "left", "buttons": 0, "clickCount": 1},
+	}
+	for i, params := range steps {
 		if err := c.call(session, "Input.dispatchMouseEvent", params, nil); err != nil {
 			return err
+		}
+		if i < len(steps)-1 {
+			sleepMS([]int{150, 60}[i])
 		}
 	}
 	return nil
@@ -378,6 +406,11 @@ func (c *wsConn) keyPress(session, key string, delayMS int) error {
 		if len(upper) == 1 && upper[0] >= 'A' && upper[0] <= 'Z' {
 			code = "Key" + upper
 			windowsCode = 65 + int(upper[0]-'A')
+		} else if len(key) == 1 && key[0] >= '0' && key[0] <= '9' {
+			// Digits as real key presses: spinbutton segments (a time
+			// picker's hour and minute) listen to keydown and ignore
+			// Input.insertText.
+			code, windowsCode, text = "Digit"+key, 48+int(key[0]-'0'), key
 		} else {
 			code, text = key, key
 		}

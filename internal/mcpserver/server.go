@@ -62,7 +62,7 @@ var Tools = []ToolDef{
 	{"create_reminder", "Add a reminder, optionally with a due time.", TierSilent, "no"},
 	{"drive_status", "When the Drive pull last ran and what it holds. Status only.", TierReadOnly, "no"},
 	{"reask_access", "Re-fire Apple's data-access prompt. Asks the owner first.", TierConfirmed, "yes"},
-	{"open_login", "Open the supervised VNC login door. Asks the owner first.", TierConfirmed, "yes"},
+	{"open_login", "Open the login door: a one-time link where the owner signs in to iCloud from any browser. Use when a call reports needs_login. Asks the owner first.", TierConfirmed, "yes"},
 	{"health_status", "Health store coverage and freshness, blind spots named.", TierReadOnly, "no"},
 	{"health_days", "Per-day steps, energy, resting heart rate, HRV.", TierReadOnly, "no"},
 	{"health_sleep", "Sleep by night, stage labels kept.", TierReadOnly, "no"},
@@ -71,14 +71,13 @@ var Tools = []ToolDef{
 	{"health_sql", "One read-only SELECT against the health store.", TierReadOnly, "no"},
 }
 
-// approveSchema carries one optional boolean;
-// no required fields, so a plain accept with an empty object validates as
-// an approval while a client that renders the field can still say no.
+// approveSchema asks for nothing: accept is yes, decline is no. A form
+// with no fields renders as one confirmation (a boolean field made clients
+// render a form plus a review step for a single yes). A legacy client that
+// still sends approve=false is refused below.
 var approveSchema = map[string]any{
-	"type": "object",
-	"properties": map[string]any{
-		"approve": map[string]any{"type": "boolean"},
-	},
+	"type":       "object",
+	"properties": map[string]any{},
 }
 
 // AskApproval asks the owner through MCP elicitation. It returns "" when
@@ -147,7 +146,7 @@ func NewWithHandlers(handlers map[string]server.ToolHandlerFunc) *server.MCPServ
 				return stubHandler(ctx, s, def)
 			}
 		}
-		tool := mcp.NewTool(def.Name, mcp.WithDescription(def.Description))
+		tool := mcp.NewTool(def.Name, append([]mcp.ToolOption{mcp.WithDescription(def.Description)}, toolOptions(def.Name)...)...)
 		s.AddTool(tool, handler)
 	}
 	return s

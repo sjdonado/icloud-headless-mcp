@@ -473,3 +473,18 @@ func TestParseTime(t *testing.T) {
 		t.Fatalf("error = %q", msg)
 	}
 }
+
+// TestCalendarQueryNamesProps guards the iCloud empty-data regression:
+// allprop/allcomp comes back as a VCALENDAR with no children there.
+func TestCalendarQueryNamesProps(t *testing.T) {
+	q := calendarQuery(time.Now(), time.Now().Add(time.Hour), true)
+	if q.CompRequest.AllProps || q.CompRequest.AllComps {
+		t.Fatal("calendar query uses allprop/allcomp, which iCloud answers with empty calendar data")
+	}
+	if len(q.CompRequest.Comps) != 1 || q.CompRequest.Comps[0].Name != "VEVENT" || len(q.CompRequest.Comps[0].Props) == 0 {
+		t.Fatalf("calendar query must name VEVENT props, got %+v", q.CompRequest.Comps)
+	}
+	if q.CompRequest.Expand == nil {
+		t.Fatal("listing queries must expand recurrences")
+	}
+}

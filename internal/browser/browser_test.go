@@ -110,15 +110,17 @@ func (f *fakeCDP) serveWS(ws *nws.Conn) {
 			f.created = append(f.created, u)
 			f.mu.Unlock()
 			f.reply(ws, id, map[string]any{"targetId": "t-new"})
-		case "Page.navigate", "Target.detachFromTarget",
+		case "Page.navigate", "Target.detachFromTarget", "Page.bringToFront",
 			"Browser.grantPermissions", "Emulation.setTimezoneOverride", "Network.enable":
 			f.mu.Unlock()
 			f.reply(ws, id, map[string]any{})
 		case "Runtime.enable":
 			f.mu.Unlock()
-			f.reply(ws, id, map[string]any{})
-			// Existing contexts report on enable, which is what
-			// identifies the frame's main world.
+			// Shaped like Chrome: existing contexts report first (which is
+			// what identifies the frame's main world), then the page's
+			// whole console buffer replays, then the reply. Real
+			// Reminders replayed 281 messages, which once trimmed the
+			// context event out of the queue.
 			raw, _ := json.Marshal(map[string]any{
 				"method": "Runtime.executionContextCreated",
 				"params": map[string]any{"context": map[string]any{
@@ -129,6 +131,11 @@ func (f *fakeCDP) serveWS(ws *nws.Conn) {
 				}},
 			})
 			_ = ws.Write(context.Background(), nws.MessageText, raw)
+			for i := 0; i < 300; i++ {
+				raw, _ := json.Marshal(map[string]any{"method": "Runtime.consoleAPICalled", "params": map[string]any{"type": "log"}})
+				_ = ws.Write(context.Background(), nws.MessageText, raw)
+			}
+			f.reply(ws, id, map[string]any{})
 		case "Page.createIsolatedWorld":
 			f.mu.Unlock()
 			f.reply(ws, id, map[string]any{"executionContextId": 7})

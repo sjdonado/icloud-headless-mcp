@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestDispatch(t *testing.T) {
 	for _, tc := range []struct {
@@ -22,7 +25,7 @@ func TestDispatch(t *testing.T) {
 
 func TestSubcommandsComplete(t *testing.T) {
 	want := []string{
-		"serve", "session-check", "resident", "login",
+		"serve", "session-check", "resident", "login", "door",
 		"reask", "drain", "tab-reaper", "drive-fetch", "health-import",
 	}
 	if len(subcommands) != len(want) {
@@ -32,5 +35,19 @@ func TestSubcommandsComplete(t *testing.T) {
 		if _, ok := subcommands[name]; !ok {
 			t.Errorf("subcommand %q missing from dispatch", name)
 		}
+	}
+}
+
+func TestChromeUA(t *testing.T) {
+	ua, err := chromeUA("Google Chrome 145.0.7632.117 \n", "darwin")
+	if err != nil || ua != "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36" {
+		t.Fatalf("darwin: %q %v", ua, err)
+	}
+	ua, err = chromeUA("Chromium 140.0.7339.80 built on Debian", "linux")
+	if err != nil || !strings.Contains(ua, "(X11; Linux x86_64)") || !strings.Contains(ua, "Chrome/140.0.0.0 ") {
+		t.Fatalf("linux: %q %v", ua, err)
+	}
+	if _, err := chromeUA("garbage", "linux"); err == nil {
+		t.Fatal("no version must refuse rather than guess")
 	}
 }

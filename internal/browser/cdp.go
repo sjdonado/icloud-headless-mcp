@@ -98,9 +98,16 @@ func (c *wsConn) callTimeout(sessionID, method string, params, result any, timeo
 		if err := json.Unmarshal(data, &reply); err != nil {
 			continue
 		}
-		if _, isEvent := reply["method"]; isEvent {
+		if method, isEvent := reply["method"].(string); isEvent {
 			// Queue, don't drop: request sniffing and crash watching
-			// read the stream between calls.
+			// read the stream between calls. Console and exception
+			// events are the exception: nothing reads them, and a
+			// Runtime.enable replays the page's whole console buffer
+			// (281 messages on Reminders, measured) right after the
+			// context events, which trimmed those out of the queue.
+			if method == "Runtime.consoleAPICalled" || method == "Runtime.exceptionThrown" {
+				continue
+			}
 			c.pending = append(c.pending, reply)
 			if len(c.pending) > 256 {
 				c.pending = c.pending[len(c.pending)-256:]

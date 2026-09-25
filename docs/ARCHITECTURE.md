@@ -10,7 +10,7 @@ Notes and Reminders each hold their own per-app lock, because there is one brows
 
 | Path | What it is |
 | --- | --- |
-| `cmd/icloud-mcp` | the one static binary: the server (default, no subcommand) and every helper as subcommands (`session-check`, `resident`, `login`, `reask`, `drain`, `tab-reaper`, `drive-fetch`). `icloud-mcp help` lists them |
+| `cmd/icloud-mcp` | the one static binary: the server (default, no subcommand) and every helper as subcommands (`session-check`, `resident`, `login`, `door`, `reask`, `drain`, `tab-reaper`, `drive-fetch`, `health-import`). `icloud-mcp help` lists them |
 | `internal/mcpserver` | the one `MCPServer`, the transport, and the elicitation approval gate |
 | `internal/config` | the account's env contract |
 | `internal/dav` | calendar and contacts over CalDAV and CardDAV, and the confirmed delete |
@@ -18,28 +18,49 @@ Notes and Reminders each hold their own per-app lock, because there is one brows
 | `internal/notes` | Notes, through the browser |
 | `internal/reminders` | Reminders, through the browser and through CloudKit for completions |
 | `internal/drive` | `drive_status`, and nothing that touches the pull |
+| `internal/session` | recovery: `reask_access`, `open_login`, and the login door (`doorserve.go` is the door process, `door.html` its page) |
 | `internal/browser` | the CDP attach, the per-app locks, the blocked latch, quiet hours, the timezone override, and the tab reaper. Shared between the server handlers and the subcommands, and by nothing outside this directory |
 | `internal/drivefetch`, `internal/dvlibraries` | the Drive fetch mechanics and which libraries this install pulls |
 | `internal/queue`, `internal/drain` | the pending-write queue and the drain pass over it |
 | `internal/health` | the optional health extension: export importer, SQLite store, and six read-only tools. Only the importer opens the store read-write; the Drive layer never learns what it stages for it. The store file belongs to the service account exclusively: adopting another account's database means copying it into place, never pointing at it live |
-| `systemd/` | six units: the display, the browser, VNC and noVNC, and the tab reaper with its timer |
+| `systemd/` | the resident browser, the tab reaper with its timer, and the health import with its timer |
 | `sudoers.d/` | two rules: the one wrapper a caller may spawn, and the re-ask |
 
-`icloud-mcp` with no subcommand serves stdio, which is what `stdio.sh` spawns; the units and wrappers name the same binary with its subcommand, so the one-binary property is reviewable in one `ls`.
+`icloud-mcp` with no subcommand serves stdio, which is what `stdio.sh` spawns; the units and wrappers name the same binary with its subcommand, so the one-binary property is reviewable in one `ls`. `local.sh` runs the same binary from a checkout, with `.env` and `.state/` beside it.
+
+## The resident browser
+
+The resident (`icloud-mcp resident`) is one Chromium against the persisted profile under `$ICLOUD_STATE/profile`, with DevTools on loopback (`ICLOUD_CDP`, default `http://127.0.0.1:9222`) for the tools to attach to. It always runs `--headless=new`, so no host needs a display. Apple binds the session to the user agent, and the headless build announces itself as `HeadlessChrome`, so the resident passes `--user-agent` with Chrome's reduced user agent for the binary's own major version and a frozen per-OS platform token (`chromeUA` in `cmd/icloud-mcp/sub_resident.go`). That is the same string a headed build on that OS sends. `ICLOUD_HEADED=1` runs it headed instead.
+
+Who starts it depends on the install. On the worked-example server, systemd's `agent-browser` owns it and `stdio.sh` sets `ICLOUD_RESIDENT=external`. Anywhere else, `serve` starts it: when nothing answers on a loopback `ICLOUD_CDP`, the server spawns `icloud-mcp resident` detached into its own session (log at `$ICLOUD_STATE/resident.log`), so the browser outlives the server and the agent that started it. A flock on `$ICLOUD_STATE/resident-start.lock` keeps two servers starting at once from racing two browsers onto one profile. A remote `ICLOUD_CDP` is never started.
+
+The resident pings every page target every five seconds and exits after four consecutive failures, so a wedged browser is a visible failure rather than a silent one. It closes crashed renderer tabs instead of the process, and it saves the cookie jar every five minutes and on shutdown.
 
 ## The session, and what a restart costs
 
-The resident browser holds the iCloud session in process memory, and its profile under `$ICLOUD_STATE` persists the cookies, so a relaunch comes back signed in. A restart does not cost the session.
+The resident browser holds the iCloud session in process memory, and its profile persists the cookies, so a relaunch comes back signed in. A restart does not cost the session: verified on 2026-09-25 with Chrome 145, headless, on the same profile.
 
-What a restart costs is Apple's data-access grant, which is bound to the browser instance. Loading an iCloud app page is what asks Apple for it, so the next app-page load after a restart raises "Allow your iCloud data to be accessed via the web?" on the owner's devices. The resident therefore loads only `icloud.com` at startup and opens no app tab, which is what makes `Restart=on-failure` safe.
+What a restart can cost is Apple's data-access grant, which is bound to the browser instance. Loading an iCloud app page is what asks Apple for it, so the next app-page load after a restart may raise "Allow your iCloud data to be accessed via the web?" on the owner's devices. The resident therefore loads only `icloud.com` at startup and opens no app tab, which is what makes `Restart=on-failure` safe.
 
 A fresh app-page load is refused between 23:00 and 07:00 local. An already-loaded tab is untouched, so reading notes and reminders through the night still works; only a load that would raise a prompt is deferred, with a message saying so.
 
-One latch decides whether the owner has already been asked, at `$ICLOUD_SHARED_STATE/blocked`. While it exists, the app helper refuses before touching the browser, nothing retries, and no watchdog restarts or re-requests, because retrying cannot produce a different answer until the owner approves. It is released by `agent-reask-access`, which is the owner saying they are at a device, or by `icloud-mcp session-check` reporting healthy. A re-ask navigates one app rather than two, because Apple's grant covers iCloud.com data rather than a single application.
+One latch decides whether the owner has already been asked, at `$ICLOUD_SHARED_STATE/blocked`. While it exists, the app helper refuses before touching the browser, nothing retries, and no watchdog restarts or re-requests, because retrying cannot produce a different answer until the owner approves. It is released by `agent-reask-access` or `reask_access`, which is the owner saying they are at a device, or by `icloud-mcp session-check` reporting healthy. A re-ask navigates one app rather than two, because Apple's grant covers iCloud.com data rather than a single application.
 
-When the session itself has expired, that is a different failure with a different message and it is interactive: start `agent-vnc`, tunnel to it over loopback, sign in, and tick "Trust this browser", or Apple never issues `X-APPLE-WEBAUTH-TOKEN` and the session dies at the next restart. Re-grant data access when prompted, then stop `agent-vnc`; the unit has no `[Install]` section on purpose, so it never comes back at boot.
+`reask_access` runs the re-navigate plus latch-clear core that lives in `session.Reask` (the `reask` subcommand delegates to it), but only when the latch is set, outside quiet hours, and the owner approves the ask: the re-navigation itself does not check the clock, so the tool carries that gate or a night call would spend a prompt.
 
-The same two recoveries are tools, for when nobody can SSH. `reask_access` runs the re-navigate plus latch-clear core that lives in `session.Reask` (the `reask` subcommand delegates to it), but only when the latch is set, outside quiet hours, and the owner approves the ask: the re-navigation itself does not check the clock, so the tool carries that gate or a night call would spend a prompt. `open_login` opens a supervised door instead of the hand-started units: one x11vnc plus one websockify on the same fixed ports, behind a one-time 8-character password (VNC auth truncates longer ones) with a 20-minute TTL. The websockify listener binds the tailnet address when the tool advertises one and loopback otherwise, never a wildcard. Both servers run under `timeout`, so the processes die at TTL even with no further traffic; the door record lives under `$ICLOUD_STATE/state/login-door/` with the pids, the expiry, and the password file, and is swept by every session-tool entry and every successful browser call, early when a healthy session is observed. The password is issued once in the opening result and never stored in cleartext. Either tool refuses before acting when its precondition fails, so both are safe to probe.
+## The login door
+
+When the session itself has expired, the fix is a human signing in, with two-factor, and ticking "Trust this browser", or Apple never issues `X-APPLE-WEBAUTH-TOKEN` and the session dies at the next relaunch. The login door is how that human reaches a headless browser on a machine with no screen.
+
+It is one process, `icloud-mcp door HOST:PORT TTL PASSFILE`, started by `open_login` (after the owner approves the ask) or by the operator's `icloud-mcp login`. Nothing else starts it. The process:
+
+- serves one page and one WebSocket, behind HTTP Basic auth: username `root` and a 16-character password from `crypto/rand` (about 93 bits). The password is written to a 0600 file under `$ICLOUD_STATE/state/login-door/`, read once by the door, never passed in argv, and shredded when the door closes.
+- binds the host's Tailscale IPv4 when `tailscale ip -4` answers, and `127.0.0.1` otherwise, never a wildcard. It prefers port 6080 and takes a free port when something else holds it; the link carries the port.
+- attaches to the resident's icloud.com home tab, never a Notes or Reminders app tab a tool may be driving (or opens one), brings it to the front and streams it with `Page.startScreencast`. The viewer page sends back only `Input.dispatchMouseEvent`, `Input.dispatchKeyEvent`, `Input.insertText` (the Paste button) and `Page.reload`. The door drops every other method, so a viewer can type and click but can never evaluate script in the page.
+- checks the session at start and every three seconds. On a sign-in (healthy, or signed in and waiting for the grant) it stops streaming, sends the viewers a done message that swaps the page for "Signed in to iCloud, continue in your agent" (or the approval variant), and exits ten seconds later. The stream stops before the signed-in iCloud home can show the owner's data.
+- exits by itself at its TTL (20 minutes) whether or not anything reaps it.
+
+`open_login` refuses before acting when its precondition fails: a latched grant routes to `reask_access`, a healthy session needs no door, and an unreachable browser has no screen to sign into. Every open replaces any door already open, so each call issues a fresh password and the previous one stops working at once. The door record (pid, expiry, password file, link) is swept by every recovery-tool entry: an expired or dead door is closed and its password file shredded. The door runs in its own process group with a recorded argv[0] (`icloud-login-door`), so closing it is identity-checked and never kills a recycled pid.
 
 ## The Drive pull
 
@@ -55,9 +76,9 @@ What happens to a staged file afterwards is outside this server. It fetches, it 
 
 ## Pitfalls
 
-**Restarting the browser is a decision, never a side effect.** The resident process is the session, and the next app-page load after a restart costs the owner an approval tap on a device. Reloading unit files, moving these files and re-running the wrapper are all free; restarting `agent-browser`, `agent-xvfb`, `agent-vnc` or `agent-novnc` is not.
+**Restarting the browser is a decision, never a side effect.** The resident process is the session, and the next app-page load after a restart can cost the owner an approval tap on a device. Reloading unit files, moving these files and re-running the wrapper are all free; restarting `agent-browser` (or killing an auto-started resident) is not.
 
-**Chromium must run headed.** Headless mode reports a different user agent, and Apple binds the session to the user agent, so a headless relaunch reads as a different browser and the session dies server-side. Hence the permanent virtual display.
+**The user agent is part of the session.** Apple binds the session to it, and plain headless Chromium reports `HeadlessChrome`, so a relaunch under a different string reads as a different browser and the session dies server-side. The resident always sends the ordinary Chrome user agent for its major version. Never launch the profile under another user agent, and never switch a signed-in profile between headless and headed with differing strings.
 
 **CalDAV's Reminders store is a dead one.** `caldav.icloud.com` serves a legacy store that Apple left behind when Reminders moved to the CloudKit format: writes there succeed, read back, and are invisible on every device and in Apple's own web UI. Reminders are browser-backed for that reason, and reminder tools must never be restored on CalDAV.
 
@@ -88,5 +109,7 @@ What happens to a staged file afterwards is outside this server. It fetches, it 
 **A signed-out page still looks like an app.** It renders an app-shaped shell that accepts clicks and discards them, and Apple serves a signed-out app URL with the app's own title, so signed-in state is judged from page content and `SignedOut` is raised before any navigation.
 
 **Access can lapse on its own.** With Advanced Data Protection, the web gets only temporary access and the app then sits on "Getting Access" showing nothing. Reporting that as "you have no notes" would be a confident lie, so the tools detect it and return an honest failure with `needs_device_approval`.
+
+**Current Chrome rejects an empty frame id.** `Page.createIsolatedWorld` with `frameId: ""` fails with "No frame for given id found", so a liveness ping evaluates in the page's main world instead. An isolated world always needs a real frame id from `Page.getFrameTree`.
 
 **A modal alert blocks every click while the DOM looks healthy.** An Apple error alert sitting over the app makes a click succeed and do nothing, and its OK is a `div`, not a `button`, so a tag-based search finds nothing to dismiss. Opening a list dismisses any alert first. When the DOM says everything is fine and nothing works, take a screenshot.

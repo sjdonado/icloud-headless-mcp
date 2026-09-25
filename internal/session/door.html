@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>iCloud login door</title>
+<style>
+  :root { color-scheme: light dark; --bg: #f5f5f7; --fg: #1d1d1f; --muted: #6e6e73; --ok: #248a3d; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #1c1c1e; --fg: #f5f5f7; --muted: #98989d; --ok: #30d158; } }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px -apple-system, system-ui, sans-serif; }
+  header { display: flex; gap: 12px; align-items: center; padding: 8px 16px; }
+  header span { color: var(--muted); flex: 1; }
+  button { font: inherit; padding: 4px 10px; }
+  #done { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; min-height: 100vh; padding: 0 16px; text-align: center; box-sizing: border-box; }
+  #done[hidden] { display: none; }
+  #done h1 { margin: 8px 0 0; font-size: 28px; font-weight: 600; letter-spacing: -0.01em; }
+  #done p { margin: 0; color: var(--muted); font-size: 15px; max-width: 32em; line-height: 1.45; }
+  #done svg { width: 56px; height: 56px; color: var(--ok); }
+  #screen { display: block; max-width: 100%; max-height: calc(100vh - 48px); margin: 0 auto; outline: none; cursor: default; background: #fff; }
+</style>
+</head>
+<body>
+<main id="done" hidden>
+  <svg viewBox="0 0 56 56" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="28" cy="28" r="25"/><path d="M17 29l7.5 7.5L39 21"/></svg>
+  <h1 id="done-title">Signed in to iCloud</h1>
+  <p id="done-text">The login door has closed. You can close this window and continue in your agent.</p>
+</main>
+<div id="door">
+<header>
+  <strong>iCloud login door</strong>
+  <span id="status">connecting…</span>
+  <button id="paste" type="button" title="Type your clipboard into the focused field, e.g. a password">Paste</button>
+  <button id="reload" type="button">Reload page</button>
+</header>
+<canvas id="screen" tabindex="0" width="1280" height="900"></canvas>
+</div>
+<script>
+const canvas = document.getElementById('screen');
+const ctx = canvas.getContext('2d');
+const status = document.getElementById('status');
+let meta = null;
+const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+const send = (m) => ws.readyState === 1 && ws.send(JSON.stringify(m));
+
+ws.onopen = () => { status.textContent = 'Click the page, then sign in. Tick "Trust this browser".'; canvas.focus({ preventScroll: true }); };
+let finished = false;
+function showDone(kind) {
+  finished = true;
+  if (kind === 'needs-approval') {
+    document.getElementById('done-title').textContent = 'Signed in, one step left';
+    document.getElementById('done-text').textContent = 'Approve the iCloud data-access prompt on one of your Apple devices, then continue in your agent. You can close this window.';
+  }
+  document.getElementById('door').hidden = true;
+  document.getElementById('done').hidden = false;
+  document.title = 'Signed in to iCloud';
+}
+ws.onclose = (e) => { if (finished) return; status.textContent = 'Disconnected' + (e.reason ? ': ' + e.reason : '') + '. Reload this page to reconnect.'; };
+ws.onmessage = (e) => {
+  const f = JSON.parse(e.data);
+  if (f.done) { showDone(f.done); return; }
+  meta = f.metadata;
+  const img = new Image();
+  img.onload = () => {
+    if (canvas.width !== img.width || canvas.height !== img.height) { canvas.width = img.width; canvas.height = img.height; }
+    ctx.drawImage(img, 0, 0);
+  };
+  img.src = 'data:image/jpeg;base64,' + f.data;
+};
+
+// Canvas pixels to page CSS pixels.
+function point(e) {
+  const r = canvas.getBoundingClientRect();
+  const w = meta ? meta.deviceWidth : canvas.width, h = meta ? meta.deviceHeight : canvas.height;
+  return { x: (e.clientX - r.left) * w / r.width, y: (e.clientY - r.top) * h / r.height };
+}
+const buttons = ['left', 'middle', 'right'];
+function mouse(type, e, extra) {
+  const p = point(e);
+  send({ kind: 'mouse', method: 'Input.dispatchMouseEvent', params: Object.assign({ type, x: p.x, y: p.y, button: buttons[e.button] || 'none', buttons: e.buttons, clickCount: e.detail || 1 }, extra || {}) });
+}
+canvas.addEventListener('mousedown', (e) => { canvas.focus({ preventScroll: true }); mouse('mousePressed', e); e.preventDefault(); });
+canvas.addEventListener('mouseup', (e) => mouse('mouseReleased', e));
+canvas.addEventListener('mousemove', (e) => mouse('mouseMoved', e, { button: 'none', clickCount: 0 }));
+canvas.addEventListener('wheel', (e) => { mouse('mouseWheel', e, { button: 'none', deltaX: e.deltaX, deltaY: e.deltaY }); e.preventDefault(); }, { passive: false });
+canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+const codes = { Enter: 13, Backspace: 8, Tab: 9, Escape: 27, ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, Delete: 46, Home: 36, End: 35 };
+function mods(e) { return (e.altKey ? 1 : 0) | (e.ctrlKey ? 2 : 0) | (e.metaKey ? 4 : 0) | (e.shiftKey ? 8 : 0); }
+canvas.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'v') return; // let paste through
+  const printable = e.key.length === 1 && !e.ctrlKey && !e.metaKey;
+  const base = { key: e.key, code: e.code, modifiers: mods(e), windowsVirtualKeyCode: codes[e.key] || (printable ? e.key.toUpperCase().charCodeAt(0) : e.keyCode) };
+  if (printable) {
+    send({ kind: 'key', method: 'Input.dispatchKeyEvent', params: Object.assign({ type: 'keyDown', text: e.key }, base) });
+  } else {
+    send({ kind: 'key', method: 'Input.dispatchKeyEvent', params: Object.assign({ type: 'rawKeyDown' }, base, e.key === 'Enter' ? { text: '\r' } : {}) });
+  }
+  send({ kind: 'key', method: 'Input.dispatchKeyEvent', params: Object.assign({ type: 'keyUp' }, base) });
+  e.preventDefault();
+});
+document.addEventListener('paste', (e) => { send({ kind: 'text', text: e.clipboardData.getData('text') }); e.preventDefault(); });
+// The Clipboard API needs a secure context (https or localhost); a tailnet
+// http link is neither, so fall back to a prompt the owner pastes into.
+document.getElementById('paste').onclick = async () => {
+  let text = null;
+  try { if (navigator.clipboard && window.isSecureContext) text = await navigator.clipboard.readText(); } catch (_) {}
+  if (text === null) text = window.prompt('Paste here (Cmd/Ctrl+V), then OK. It is typed into the focused field.');
+  if (text) send({ kind: 'text', text });
+  canvas.focus({ preventScroll: true });
+};
+document.getElementById('reload').onclick = () => { send({ kind: 'reload' }); canvas.focus({ preventScroll: true }); };
+</script>
+</body>
+</html>

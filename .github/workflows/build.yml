@@ -1,18 +1,29 @@
-# Build: every merge to main publishes installable tarballs.
+# Build: every merge to main publishes installable tarballs, and every
+# pull request runs the same checks before it can merge.
 #
 # Each main push builds one static icloud-mcp per Linux arch, stamps the
 # commit into `icloud-mcp version`, and republishes the rolling `latest`
 # GitHub Release. install.sh fetches those assets, so main is installable
 # if and only if this workflow is green.
+#
+# Only the test job runs on pull requests: build and publish are main-only,
+# because a pull request must never be able to publish a release.
 name: build
 
 on:
   push:
     branches:
       - main
+  pull_request:
 
 permissions:
-  contents: write
+  contents: read
+
+# Supersede in-flight runs for the same ref on pull requests only. A main
+# push is never cancelled: it is the run that publishes.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
@@ -22,11 +33,20 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed for:"; echo "$unformatted"; exit 1
+          fi
       - run: go vet ./...
       - run: go test ./...
+      - run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -buildvcs=false -o /dev/null ./cmd/icloud-mcp
+      - run: CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -buildvcs=false -o /dev/null ./cmd/icloud-mcp
 
   build:
     needs: test
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -53,7 +73,7 @@ jobs:
           mkdir -p "dist/$name/bin" "dist/$name/systemd" "dist/$name/sudoers.d"
           cp dist/icloud-mcp "dist/$name/bin/icloud-mcp"
           cp stdio.sh "dist/$name/bin/stdio.sh"
-          cp bin/agent-reask-access bin/icloud-login.sh "dist/$name/bin/"
+          cp bin/agent-reask-access bin/icloud-mcp-host "dist/$name/bin/"
           cp systemd/* "dist/$name/systemd/"
           cp sudoers.d/* "dist/$name/sudoers.d/"
           cp .env.example LICENSE "dist/$name/"
@@ -67,6 +87,10 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-latest
+    # The workflow default is read-only so a pull request cannot publish;
+    # this job is the one that needs to write, and it only runs on main.
+    permissions:
+      contents: write
     concurrency:
       group: rolling-release
       cancel-in-progress: false

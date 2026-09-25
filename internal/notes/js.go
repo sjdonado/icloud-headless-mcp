@@ -142,6 +142,38 @@ const setClipboardJS = `async (html) => {
 
 const readClipboardJS = `() => navigator.clipboard.readText()`
 
+// noteRowPointJS returns the center of the on-screen list row for a note,
+// matched on its exact first line (and date line when given). The list is
+// virtualised: each note has a rendered copy plus a parked one at y=-9861,
+// and DOM order is not screen order, so an index into the containers
+// (the old slot) could click a parked copy or another note entirely
+// (inspected live, 2026-09-25).
+const noteRowPointJS = `([title, date]) => {
+  const found = [];
+  const walk = (root, depth) => {
+    if (depth > 14) return;
+    for (const el of root.querySelectorAll('*')) {
+      if (el.shadowRoot) walk(el.shadowRoot, depth + 1);
+      if ((el.className || '').toString().split(/\s+/).includes('note-list-item-container')) found.push(el);
+    }
+  };
+  walk(document, 0);
+  for (const el of found) {
+    const b = el.getBoundingClientRect();
+    if (b.height <= 0 || b.y < 0 || b.y + b.height > window.innerHeight) continue;
+    const lines = (el.innerText || '').split('\n').map((l) => l.trim()).filter(Boolean);
+    if (lines[0] !== title || (date && !lines.includes(date))) continue;
+    return {x: Math.round(b.x + b.width / 2), y: Math.round(b.y + b.height / 2)};
+  }
+  return null;
+}`
+
+const clipboardStateJS = `async () => {
+  let write = '?';
+  try { write = (await navigator.permissions.query({name: 'clipboard-write'})).state; } catch (e) { write = e.name; }
+  return 'clipboard-write=' + write + ' focus=' + document.hasFocus();
+}`
+
 const padCenterJS = `() => {
   const pads = document.querySelectorAll('.notes-pad-view');
   if (!pads.length) return 'not found';

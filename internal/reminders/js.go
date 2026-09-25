@@ -269,31 +269,92 @@ const focusedTextJS = `() => {
   });
 }`
 
-const focusNewRowJS = `() => {
+// Row snippets for create, built from the DOM as inspected live: each row
+// is div.reminder-item[role=row], its committed title is its aria-label
+// (empty while a new row is being typed), and its title editor is
+// div.tt-input-field[contenteditable][role=textbox].
+
+// rowWithAriaJS reports whether a committed row is titled exactly title.
+const rowWithAriaJS = `(title) => {
   ` + "%s" + `
-  const rows = [];
+  let found = false;
   walk(document, 0, (el) => {
-    if ((el.className||'').toString().split(/\s+/).includes('reminder-item')) rows.push(el);
+    if (!found && (el.className||'').toString().split(/\s+/).includes('reminder-item')
+        && el.getAttribute('aria-label') === title) found = true;
   });
-  let target = null;
-  for (const r of rows) {
-    let ct = '';
-    walk(r, 0, (x) => {
-      if (!ct && (x.className||'').toString().split(/\s+/).includes('content-title'))
-        ct = (x.innerText||'').trim();
-    });
-    if (!ct) target = r;
-  }
-  if (!target) return JSON.stringify({error: 'no empty row to type into'});
+  return found;
+}`
+
+// countAriaJS counts the rows whose aria-label is exactly title, every row
+// in the page (items() dedupes, which collapses same-titled reminders).
+const countAriaJS = `(title) => {
+  ` + "%s" + `
+  let n = 0;
+  walk(document, 0, (el) => {
+    if ((el.className||'').toString().split(/\s+/).includes('reminder-item')
+        && el.getAttribute('aria-label') === title) n++;
+  });
+  return n;
+}`
+
+// focusEmptyRowJS focuses the title editor of the last uncommitted row
+// (aria-label empty) and reports whether it now holds focus.
+const focusEmptyRowJS = `() => {
+  ` + "%s" + `
+  let row = null;
+  walk(document, 0, (el) => {
+    if ((el.className||'').toString().split(/\s+/).includes('reminder-item')
+        && !el.getAttribute('aria-label')) row = el;
+  });
+  if (!row) return false;
   let field = null;
-  walk(target, 0, (el) => {
-    if (!field && (el.className||'').toString().includes('tt-input-field')) field = el;
+  walk(row, 0, (el) => { if (!field && (el.className||'').toString().includes('tt-input-field')) field = el; });
+  if (!field) return false;
+  field.focus();
+  let a = document.activeElement;
+  while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement;
+  return a === field;
+}`
+
+// focusRowTitledJS focuses the title editor of the last row titled
+// exactly want (a placeholder to retitle) and reports whether it took.
+const focusRowTitledJS = `(want) => {
+  ` + "%s" + `
+  let row = null;
+  walk(document, 0, (el) => {
+    if ((el.className||'').toString().split(/\s+/).includes('reminder-item')
+        && el.getAttribute('aria-label') === want) row = el;
   });
-  if (!field) return JSON.stringify({error: 'no tt-input-field on the new row'});
-  field.scrollIntoView({block: 'center'});
-  const r = field.getBoundingClientRect();
-  return JSON.stringify({x: Math.round(r.x + Math.min(40, r.width/2)),
-                         y: Math.round(r.y + r.height/2)});
+  if (!row) return false;
+  let field = null;
+  walk(row, 0, (el) => { if (!field && (el.className||'').toString().includes('tt-input-field')) field = el; });
+  if (!field) return false;
+  field.focus();
+  let a = document.activeElement;
+  while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement;
+  return a === field;
+}`
+
+// focusInRowJS reports whether keyboard focus is inside the row
+// focusNewRowJS targets (same want semantics). Any focused title field is
+// not enough: a stray row can keep focus while a click on the new row only
+// selects it, and typing then lands in the wrong reminder.
+const focusInRowJS = `(want) => {
+  ` + "%s" + `
+  let target = null;
+  walk(document, 0, (el) => {
+    if (!(el.className||'').toString().split(/\s+/).includes('reminder-item')) return;
+    const aria = el.getAttribute('aria-label') || '';
+    if (want ? aria === want : !aria) target = el;
+  });
+  if (!target) return false;
+  let el = document.activeElement;
+  while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement;
+  while (el) {
+    if (el === target) return true;
+    el = el.parentNode || (el.getRootNode && el.getRootNode().host) || null;
+  }
+  return false;
 }`
 
 const timeCheckboxJS = `() => {
@@ -319,6 +380,23 @@ const segmentJS = `(which) => {
   const r = seg.getBoundingClientRect();
   return JSON.stringify({text: (seg.innerText||'').trim(),
                          x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2)});
+}`
+
+// focusSegmentJS focuses one time segment by its label and reports
+// whether it holds focus. Clicking its measured center landed on AM/PM
+// (headless, Chromium 153), so the segment is focused directly.
+const focusSegmentJS = `(which) => {
+  ` + "%s" + `
+  let seg = null;
+  walk(document, 0, (el) => {
+    if (!seg && el.getAttribute('role') === 'spinbutton'
+        && (el.getAttribute('aria-label')||'') === which) seg = el;
+  });
+  if (!seg) return false;
+  seg.focus();
+  let el = document.activeElement;
+  while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement;
+  return el === seg;
 }`
 
 const timeSegmentsJS = `() => {
@@ -383,20 +461,25 @@ const selectedListJS = `() => {
 
 // Interpolated snippets: each %s above takes the shared walker.
 var (
-	rowGeo       = fmt.Sprintf(rowGeoJS, walkPrelude)
-	toggleDay    = fmt.Sprintf(toggleDayJS, walkPrelude)
-	calMonth     = fmt.Sprintf(calMonthJS, walkPrelude)
-	prevMonth    = fmt.Sprintf(prevMonthJS, walkPrelude)
-	nextMonth    = fmt.Sprintf(nextMonthJS, walkPrelude)
-	clickDay     = fmt.Sprintf(clickDayJS, walkPrelude)
-	segments     = fmt.Sprintf(segmentsJS, walkPrelude)
-	saveBtn      = fmt.Sprintf(saveJS, walkPrelude)
-	popoverOpen  = fmt.Sprintf(popoverOpenJS, walkPrelude)
-	scrollEnd    = fmt.Sprintf(scrollEndJS, walkPrelude)
-	focusNewRow  = fmt.Sprintf(focusNewRowJS, walkPrelude)
-	timeCheckbox = fmt.Sprintf(timeCheckboxJS, walkPrelude)
-	segment      = fmt.Sprintf(segmentJS, walkPrelude)
-	timeSegments = fmt.Sprintf(timeSegmentsJS, walkPrelude)
-	completeGeo  = fmt.Sprintf(completeGeoJS, walkPrelude)
-	selectedList = fmt.Sprintf(selectedListJS, walkPrelude)
+	rowGeo         = fmt.Sprintf(rowGeoJS, walkPrelude)
+	toggleDay      = fmt.Sprintf(toggleDayJS, walkPrelude)
+	calMonth       = fmt.Sprintf(calMonthJS, walkPrelude)
+	prevMonth      = fmt.Sprintf(prevMonthJS, walkPrelude)
+	nextMonth      = fmt.Sprintf(nextMonthJS, walkPrelude)
+	clickDay       = fmt.Sprintf(clickDayJS, walkPrelude)
+	segments       = fmt.Sprintf(segmentsJS, walkPrelude)
+	saveBtn        = fmt.Sprintf(saveJS, walkPrelude)
+	popoverOpen    = fmt.Sprintf(popoverOpenJS, walkPrelude)
+	scrollEnd      = fmt.Sprintf(scrollEndJS, walkPrelude)
+	rowWithAria    = fmt.Sprintf(rowWithAriaJS, walkPrelude)
+	countAria      = fmt.Sprintf(countAriaJS, walkPrelude)
+	focusEmptyRow  = fmt.Sprintf(focusEmptyRowJS, walkPrelude)
+	focusRowTitled = fmt.Sprintf(focusRowTitledJS, walkPrelude)
+	focusInRow     = fmt.Sprintf(focusInRowJS, walkPrelude)
+	focusSegment   = fmt.Sprintf(focusSegmentJS, walkPrelude)
+	timeCheckbox   = fmt.Sprintf(timeCheckboxJS, walkPrelude)
+	segment        = fmt.Sprintf(segmentJS, walkPrelude)
+	timeSegments   = fmt.Sprintf(timeSegmentsJS, walkPrelude)
+	completeGeo    = fmt.Sprintf(completeGeoJS, walkPrelude)
+	selectedList   = fmt.Sprintf(selectedListJS, walkPrelude)
 )

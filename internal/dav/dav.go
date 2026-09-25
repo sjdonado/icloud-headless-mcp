@@ -248,8 +248,17 @@ func (c *Client) findEvent(ctx context.Context, events map[string]caldav.Calenda
 			if objs[i].Data == nil {
 				continue
 			}
-			if ev := firstEventUID(objs[i].Data, uid); ev != nil {
-				return &foundEvent{calName: name, path: objs[i].Path, data: objs[i].Data, event: ev}, nil
+			if firstEventUID(objs[i].Data, uid) == nil {
+				continue
+			}
+			// The query's copy carries only eventProps; an update written
+			// from it would drop everything else, so fetch the whole object.
+			full, err := calc.GetCalendarObject(ctx, objs[i].Path)
+			if err != nil || full.Data == nil {
+				return nil, fmt.Errorf("event %s was found but could not be read in full: %v", uid, err)
+			}
+			if ev := firstEventUID(full.Data, uid); ev != nil {
+				return &foundEvent{calName: name, path: full.Path, data: full.Data, event: ev}, nil
 			}
 		}
 	}
@@ -298,8 +307,17 @@ func localTime(t time.Time, ok bool) any {
 	return fmt.Sprintf("%s (%s)", t.Format("2006-01-02T15:04Z07:00"), t.Location().String())
 }
 
+// eventProps are the VEVENT properties a calendar query asks for by name.
+// iCloud answers allprop/allcomp with empty calendar data (verified live
+// 2026-09-25: the object matched, its VCALENDAR had no children), so a
+// listing asks for exactly what eventRow reads. Anything that rewrites an
+// event must GET the whole object instead of trusting a query's copy.
+var eventProps = []string{"UID", "SUMMARY", "DTSTART", "DTEND", "DURATION", "LOCATION",
+	"DESCRIPTION", "RRULE", "RECURRENCE-ID", "STATUS", "ORGANIZER", "ATTENDEE"}
+
 func calendarQuery(lo, hi time.Time, expand bool) *caldav.CalendarQuery {
-	compReq := caldav.CalendarCompRequest{Name: "VCALENDAR", AllProps: true, AllComps: true}
+	compReq := caldav.CalendarCompRequest{Name: "VCALENDAR", Props: []string{"VERSION"},
+		Comps: []caldav.CalendarCompRequest{{Name: "VEVENT", Props: eventProps}}}
 	if expand {
 		compReq.Expand = &caldav.CalendarExpandRequest{Start: lo, End: hi}
 	}

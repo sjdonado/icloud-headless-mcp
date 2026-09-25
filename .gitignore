@@ -1,5 +1,14 @@
+# Credentials and session state. Never commit any of these.
 .env
+.env.*
+!.env.example
+.state/
 cookies.json
 state.json
+user-agent
+profile/
+shared-state/
 *.vncpass
+*.sqlite
 drive-staging/
+mail-attachments/

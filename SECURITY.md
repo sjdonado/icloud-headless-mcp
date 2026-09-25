@@ -20,31 +20,28 @@ The approval gate is a containment control, not an authentication one. Confirmed
 
 ## Set up a private network before the first login
 
-This is a prerequisite, not a hardening step, and it comes before you start the browser stack or type an Apple password anywhere.
+This is a prerequisite, not a hardening step, and it comes before you type an Apple password anywhere.
 
-The first-time login is an interactive session: a remote desktop onto a browser on a headless machine, into which you type an Apple ID, a password and a two-factor code, and which afterwards holds a logged-in Apple account. The only safe way to do that is over a private network between you and the host.
+The first-time login is interactive: you open the login door, a web page that streams the headless browser on the host, type an Apple ID, a password and a two-factor code into it, and afterwards that browser holds a logged-in Apple account. The only safe way to do that is over a private network between you and the host.
 
-Tailscale is one example that fits, and the noVNC unit in this repository requires `tailscaled.service` for exactly that reason. Any WireGuard-style private network you control is an equivalent, and an SSH tunnel to a loopback-bound VNC is the smallest version of the same thing. Never expose VNC or noVNC on a public interface, not during setup and not afterwards.
+Tailscale is one example that fits, and the door binds the host's Tailscale address when Tailscale answers. Without it the door binds loopback only, and an SSH tunnel is the smallest private network that reaches it. On a laptop the door is loopback and you open it on the same machine. The door never binds a wildcard or a public interface, and nothing here should ever put it behind one.
 
-## VNC and noVNC must stay on loopback
+## The login door
 
-Those units exist for one reason: a human has to sit in front of Apple's two-factor prompt at first login, and the browser holding the session is on a machine with no screen. That is a recovery door, and it is a door onto a signed-in Apple account.
+The door exists for one reason: a human has to sit in front of Apple's two-factor prompt, and the browser holding the session runs headless, often on a machine with no screen. It is a door onto the login screen of a browser that is about to hold a signed-in Apple account, so it is built to be small, short-lived and narrow.
 
-Anyone who reaches the VNC port gets the browser as the operator sees it, which means the whole account, without needing a password Apple ever asks for again. A VNC password is not a defence worth relying on for that.
+What it is: one process (`icloud-mcp door`), started only by the `open_login` tool or the operator's `icloud-mcp login`. It serves one page and one WebSocket that streams the login tab as JPEG frames over the DevTools screencast, and it forwards the viewer's mouse, keyboard and paste back as input events.
 
-So the VNC unit binds `127.0.0.1` with `-localhost` and is reached over an SSH tunnel, the noVNC front end bridges one loopback port to another, and neither is exposed on a public interface. Neither has an `[Install]` section in this repository, which is deliberate: they are started by hand when a login is needed and stopped afterwards, because a VNC server that returns on every boot is an open door nobody remembers leaving open.
+What bounds it:
 
-If you front noVNC with anything, front it with something that terminates on the same host or on the private network above, and understand that you are publishing a logged-in Apple session behind whatever that thing's authentication is. The safe default is the SSH tunnel.
+- **The owner approves it.** `open_login` asks through the same MCP elicitation gate as a delete, so a session that cannot ask opens nothing, and a scheduled run cannot open a door. `icloud-mcp login` needs a shell as the service account on the host, which is already the owner.
+- **It opens only for a gone session.** A latched grant routes to `reask_access`, a healthy session needs no door, and an unreachable browser has no screen to sign into. Each refusal happens before anything starts.
+- **One-time credentials.** HTTP Basic auth, username `root`, and a 16-character password from `crypto/rand` (about 93 bits), compared in constant time. The password lives in a 0600 file in the service account's state directory, is never passed on a command line, and is shredded when the door closes. Every `open_login` replaces any door already open, so each call issues a fresh password and the previous one stops working at once.
+- **Narrow reach.** The listener binds the Tailscale address or loopback, never a wildcard. The link is exactly as far-reaching as that address. The one override, `ICLOUD_DOOR_BIND`, exists for the verification container (bind inside, publish on the host's loopback only) and is ignored anywhere that is not a container. A container run with `--network host` shares the host's interfaces, so do not set it there.
+- **Input only, never script.** The door forwards four methods from the viewer and drops everything else: mouse events, key events, text insertion (the Paste button) and a page reload. A viewer can type and click on the login screen; it cannot evaluate JavaScript in the page, read cookies, or reach any other DevTools domain. The DevTools port itself stays on loopback and is never proxied.
+- **Short-lived, and gone when done.** The door exits by itself at 20 minutes whether or not anything reaps it. It checks the session every three seconds, and on a sign-in it stops streaming, shows a "Signed in" screen, removes its own record and password file, and exits. Up to those three seconds of the signed-in iCloud home can reach the viewer, which is the owner who just signed in. Every recovery-tool call also sweeps an expired or dead door and shreds its password file.
 
-Never commit a VNC password file. `*.vncpass` is ignored for that reason.
-
-## A tool can open the login door
-
-`open_login` starts the same door as the units above, supervised instead of by hand: one loopback x11vnc plus one loopback websockify, a one-time password with a 20-minute TTL, and a record under the service account's state directory. This changes the threat model in exactly one way: whoever can get the agent to call the tool and read the result holds the link and the password until the door closes itself.
-
-Four things bound that. The tool asks first through the same elicitation gate as a delete, so a session that cannot ask opens nothing. It opens only for a gone session, never to bypass an approval wait, and never without a browser answering. The password is issued once, never stored in cleartext, and shredded with the door; the processes exit at TTL even with no further traffic, the record is swept on the next session-tool entry, and healthy browser calls sweep it earlier once the login is observed. And the link is only as far-reaching as the bind address: the tailnet address with Tailscale, loopback without, never a wildcard or a public interface either way.
-
-Do not weaken any of the four: no standing door, no passwordless door, no door for a merely latched session, no approval-free door. A scheduled run opening login doors is the shape of the abuse, and the tool refuses exactly that shape when nobody can answer the ask.
+What it changes in the threat model: whoever holds the link and the password drives the login screen until the door closes. The agent's result carries both, so treat an `open_login` result like a password in transit and open the door only when the owner is there to click through. Do not weaken any of the bounds above: no standing door, no passwordless door, no door on a public interface, no door for a merely latched session, no approval-free door, and no forwarding of methods beyond input.
 
 ## The sudoers grants are single-binary on purpose
 
@@ -58,13 +55,15 @@ Copy the shape, not just the effect. A rule granting `systemctl` or a command wi
 
 ## Credentials live in one file that only the service account reads
 
-The Apple ID and the app-specific password live in an environment file owned by the service account at mode 400, sourced by the wrapper inside the process. They are not in the code, not in a unit file, not in a client's configuration, and not in the environment of whatever uid calls the server.
+On the server install, the Apple ID and the app-specific password live in an environment file owned by the service account at mode 400, sourced by the wrapper inside the process. They are not in the code, not in a unit file, not in a client's configuration, and not in the environment of whatever uid calls the server.
 
 Never load that file into the client's own service unit. An app-specific password can write the whole Apple account, and the calling uid must not be able to read it. This is the single most common way an install of this quietly becomes insecure.
 
+On a single-user install (a laptop, with the agent and the server as the same user), the two values go in the agent's MCP configuration or in a `.env` beside a checkout. There is no second uid to hide them from, so the protection is file permissions: keep that file readable only by you (mode 600), and use the service-account install when the agent must not be able to read the password.
+
 The browser profile and the cookie jar are credentials too, and stronger ones than the password in some respects, because they are the live session. Keep them readable only by the service account, and never copy them off the machine or into a backup you would not protect as a credential.
 
-`.env`, `cookies.json`, `*.vncpass` and any session state are ignored by git here and must never be committed. If one is committed by accident, treat the account as compromised: revoke the app-specific password, sign the session out from an Apple device, and start the profile again.
+`.env`, `.state/`, `cookies.json` and any session state are ignored by git here and must never be committed. If one is committed by accident, treat the account as compromised: revoke the app-specific password, sign the session out from an Apple device, and start the profile again.
 
 ## Where account content goes
 
