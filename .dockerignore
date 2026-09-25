@@ -1,8 +1,17 @@
-# Keep secrets and machine state out of every build context, including
-# the dev image. Mirrors the credential entries of .gitignore.
+# Keep secrets and machine state out of the build context. Mirrors the
+# credential entries of .gitignore.
 .git
-drive-staging/
+.agent
 .env
+.env.*
+!.env.example
+.state/
 cookies.json
 state.json
+user-agent
+profile/
+shared-state/
 *.vncpass
+*.sqlite
+drive-staging/
+mail-attachments/
