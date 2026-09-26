@@ -16,6 +16,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"sort"
 	"strconv"
@@ -293,7 +294,7 @@ func eventTime(ev *ical.Event, owner *time.Location, name string) (time.Time, bo
 // fmtTime answers "when is this for the owner", the right default for
 // reading a calendar.
 func (c *Client) fmtTime(t time.Time) string {
-	return t.In(c.owner).Format("2006-01-02T15:04Z07:00")
+	return config.ISOTime(t, c.owner)
 }
 
 // localTime is the wall clock and zone the event was actually stored in.
@@ -304,7 +305,7 @@ func localTime(t time.Time, ok bool) any {
 	if !ok {
 		return nil
 	}
-	return fmt.Sprintf("%s (%s)", t.Format("2006-01-02T15:04Z07:00"), t.Location().String())
+	return fmt.Sprintf("%s (%s)", t.Format(time.RFC3339), t.Location().String())
 }
 
 // eventProps are the VEVENT properties a calendar query asks for by name.
@@ -313,11 +314,14 @@ func localTime(t time.Time, ok bool) any {
 // listing asks for exactly what eventRow reads. Anything that rewrites an
 // event must GET the whole object instead of trusting a query's copy.
 var eventProps = []string{"UID", "SUMMARY", "DTSTART", "DTEND", "DURATION", "LOCATION",
-	"DESCRIPTION", "RRULE", "RECURRENCE-ID", "STATUS", "ORGANIZER", "ATTENDEE"}
+	"DESCRIPTION", "RRULE", "RECURRENCE-ID", "STATUS", "ORGANIZER", "ATTENDEE",
+	"URL", "CREATED", "LAST-MODIFIED"}
 
 func calendarQuery(lo, hi time.Time, expand bool) *caldav.CalendarQuery {
+	alarms := caldav.CalendarCompRequest{Name: "VALARM", Props: []string{"ACTION", "TRIGGER"}}
 	compReq := caldav.CalendarCompRequest{Name: "VCALENDAR", Props: []string{"VERSION"},
-		Comps: []caldav.CalendarCompRequest{{Name: "VEVENT", Props: eventProps}}}
+		Comps: []caldav.CalendarCompRequest{{Name: "VEVENT", Props: eventProps,
+			Comps: []caldav.CalendarCompRequest{alarms}}}}
 	if expand {
 		compReq.Expand = &caldav.CalendarExpandRequest{Start: lo, End: hi}
 	}
@@ -378,27 +382,168 @@ func buildEvent(uid, summary, location, description string, start, end time.Time
 	return cal
 }
 
-// eventRow renders one event the way list_events rows read.
-func (c *Client) eventRow(calName string, ev *ical.Event) map[string]any {
-	start, end := "", ""
+// eventRow renders one event the way list_events rows read. Every field
+// comes from the props the query already asked for; a field the event does
+// not carry is omitted, never guessed. rules maps a series uid to its RRULE
+// for expanded instances, which carry RECURRENCE-ID but no rule.
+func (c *Client) eventRow(calName string, ev *ical.Event, rules map[string]string) map[string]any {
+	row := map[string]any{
+		"uid":       eventProp(ev, "UID"),
+		"calendars": []string{calName},
+		"summary":   eventText(ev, "SUMMARY"),
+		"start":     "",
+		"end":       "",
+		"all_day":   false,
+	}
+	allDay := isDate(ev.Props.Get("DTSTART"))
 	if t, ok := eventTime(ev, c.owner, "DTSTART"); ok {
-		start = c.fmtTime(t)
+		if allDay {
+			row["all_day"] = true
+			row["start"] = config.ISODate(t)
+		} else {
+			row["start"] = c.fmtTime(t)
+		}
 	}
-	if t, ok := eventTime(ev, c.owner, "DTEND"); ok {
-		end = c.fmtTime(t)
+	if t, err := ev.DateTimeEnd(c.owner); err == nil && !t.IsZero() {
+		if allDay && ev.Props.Get("DTEND") == nil {
+			// DURATION on a date counts days, not 24h spans: across a DST
+			// change start.Add(72h) lands on the previous evening.
+			if st, ok := eventTime(ev, c.owner, "DTSTART"); ok {
+				// Neither DTEND nor DURATION is a one-day event (RFC 5545);
+				// go-ical's start+24h already says so, and a nil DURATION
+				// would panic here.
+				if p := ev.Props.Get("DURATION"); p != nil {
+					if d, err := p.Duration(); err == nil {
+						t = st.AddDate(0, 0, int(math.Round(d.Hours()/24)))
+					}
+				}
+			}
+		}
+		if allDay {
+			// iCalendar's DTEND is exclusive; the last day is what a
+			// reader means by the end of an all-day event.
+			end := config.ISODate(t.AddDate(0, 0, -1))
+			if start, _ := row["start"].(string); end < start {
+				end = start
+			}
+			row["end"] = end
+		} else {
+			row["end"] = c.fmtTime(t)
+		}
+	} else if allDay {
+		row["end"] = row["start"]
 	}
-	var location any
-	if loc := eventProp(ev, "LOCATION"); loc != "" {
-		location = loc
+	for key, prop := range map[string]string{"location": "LOCATION", "description": "DESCRIPTION", "url": "URL"} {
+		if v := eventText(ev, prop); v != "" {
+			row[key] = v
+		}
 	}
-	return map[string]any{
-		"calendar": calName,
-		"summary":  eventProp(ev, "SUMMARY"),
-		"start":    start,
-		"end":      end,
-		"location": location,
-		"uid":      eventProp(ev, "UID"),
+	if v := eventProp(ev, "STATUS"); v != "" {
+		row["status"] = strings.ToLower(v)
 	}
+	if p := ev.Props.Get("ORGANIZER"); p != nil {
+		row["organizer"] = person(p)
+	}
+	if props := ev.Props.Values("ATTENDEE"); len(props) > 0 {
+		attendees := make([]map[string]any, 0, len(props))
+		for i := range props {
+			a := person(&props[i])
+			a["role"] = strings.ToLower(paramOr(&props[i], "ROLE", "REQ-PARTICIPANT"))
+			a["participation"] = strings.ToLower(paramOr(&props[i], "PARTSTAT", "NEEDS-ACTION"))
+			attendees = append(attendees, a)
+		}
+		row["attendees"] = attendees
+	}
+	rule := eventProp(ev, "RRULE")
+	if ev.Props.Get("RECURRENCE-ID") != nil {
+		row["recurring_instance"] = true
+		if rule == "" {
+			rule = rules[eventProp(ev, "UID")]
+		}
+	}
+	if rule != "" {
+		row["recurrence_rule"] = rule
+	}
+	if alarms := c.alarms(ev); len(alarms) > 0 {
+		row["alarms"] = alarms
+	}
+	for key, prop := range map[string]string{"created": "CREATED", "last_modified": "LAST-MODIFIED"} {
+		if t, ok := eventTime(ev, c.owner, prop); ok {
+			row[key] = c.fmtTime(t)
+		}
+	}
+	return row
+}
+
+// eventText is a TEXT property unescaped (newlines, commas and semicolons decoded), which
+// eventProp's raw value is not.
+func eventText(ev *ical.Event, name string) string {
+	p := ev.Props.Get(name)
+	if p == nil {
+		return ""
+	}
+	// Text() keeps only the first comma-separated item, which cuts an
+	// unescaped "snacks, drinks" to "snacks"; rejoin the list instead.
+	if l, err := p.TextList(); err == nil {
+		return strings.TrimSpace(strings.Join(l, ","))
+	}
+	return strings.TrimSpace(p.Value)
+}
+
+func isDate(p *ical.Prop) bool {
+	return p != nil && p.ValueType() == ical.ValueDate
+}
+
+func paramOr(p *ical.Prop, name, def string) string {
+	if v := p.Params.Get(name); v != "" {
+		return v
+	}
+	return def
+}
+
+// person is an ORGANIZER or ATTENDEE as {name, address}.
+func person(p *ical.Prop) map[string]any {
+	addr := p.Value
+	if len(addr) >= 7 && strings.EqualFold(addr[:7], "mailto:") {
+		addr = addr[7:]
+	}
+	out := map[string]any{"address": addr}
+	if cn := p.Params.Get(ical.ParamCommonName); cn != "" {
+		out["name"] = cn
+	}
+	return out
+}
+
+// alarms lists the event's VALARMs: a relative trigger as its ISO 8601
+// duration from the start (negative is before; related: end when anchored
+// to the end), an absolute one as a time.
+func (c *Client) alarms(ev *ical.Event) []map[string]any {
+	var out []map[string]any
+	for _, child := range ev.Children {
+		if child.Name != ical.CompAlarm {
+			continue
+		}
+		trig := child.Props.Get("TRIGGER")
+		if trig == nil {
+			continue
+		}
+		a := map[string]any{}
+		if action := child.Props.Get("ACTION"); action != nil {
+			a["action"] = strings.ToLower(action.Value)
+		}
+		if trig.ValueType() == ical.ValueDateTime {
+			if t, err := trig.DateTime(c.owner); err == nil {
+				a["at"] = c.fmtTime(t)
+			}
+		} else {
+			a["offset"] = trig.Value
+			if strings.EqualFold(trig.Params.Get("RELATED"), "END") {
+				a["related"] = "end"
+			}
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 // ListCalendars lists the calendars this account exposes over CalDAV.
@@ -466,6 +611,7 @@ func (c *Client) ListEvents(ctx context.Context, daysAhead, daysBack int, calend
 	}
 	sort.Strings(names)
 	var out []map[string]any
+	seen := map[string]int{}
 	for _, name := range names {
 		if calendar != nil && *calendar != name {
 			continue
@@ -477,25 +623,61 @@ func (c *Client) ListEvents(ctx context.Context, daysAhead, daysBack int, calend
 		if err != nil {
 			return nil, err
 		}
+		var evs []ical.Event
+		recurring := false
 		for i := range objs {
 			if objs[i].Data == nil {
 				continue
 			}
 			for _, ev := range objs[i].Data.Events() {
-				ev := ev
-				out = append(out, c.eventRow(name, &ev))
+				evs = append(evs, ev)
+				if ev.Props.Get("RECURRENCE-ID") != nil && ev.Props.Get("RRULE") == nil {
+					recurring = true
+				}
 			}
 		}
+		// Expanded instances drop RRULE (RFC 4791 9.6.5), so the series
+		// rule comes from one unexpanded query of the same window, only
+		// when an instance needs it.
+		rules := map[string]string{}
+		if recurring {
+			masters, err := calc.QueryCalendar(ctx, events[name].Path, calendarQuery(lo, hi, false))
+			if err != nil {
+				return nil, err
+			}
+			for i := range masters {
+				if masters[i].Data == nil {
+					continue
+				}
+				for _, ev := range masters[i].Data.Events() {
+					if rule := eventProp(&ev, "RRULE"); rule != "" {
+						rules[eventProp(&ev, "UID")] = rule
+					}
+				}
+			}
+		}
+		for i := range evs {
+			row := c.eventRow(name, &evs[i], rules)
+			// One entry per event: the same uid and occurrence under a
+			// shared and an own calendar is one meeting.
+			key := row["uid"].(string) + "|" + eventProp(&evs[i], "RECURRENCE-ID")
+			if j, ok := seen[key]; ok && row["uid"] != "" {
+				out[j]["calendars"] = append(out[j]["calendars"].([]string), name)
+				continue
+			}
+			seen[key] = len(out)
+			out = append(out, row)
+		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i]["start"].(string) < out[j]["start"].(string) })
+	sort.SliceStable(out, func(i, j int) bool { return out[i]["start"].(string) < out[j]["start"].(string) })
 	if out == nil {
 		out = []map[string]any{}
 	}
 	return map[string]any{
 		"count": len(out),
 		"window": map[string]any{
-			"start":    lo.Format("2006-01-02T15:04Z07:00"),
-			"end":      hi.Format("2006-01-02T15:04Z07:00"),
+			"start":    c.fmtTime(lo),
+			"end":      c.fmtTime(hi),
 			"absolute": absolute,
 		},
 		"events": out,
@@ -623,10 +805,10 @@ func (c *Client) UpdateEvent(ctx context.Context, uid string, summary, start, en
 		question := fmt.Sprintf("Change \u201c%s\u201d on your %s calendar? It has %d other %s, so they will see the change.",
 			was["summary"], found.calName, len(attendees), noun)
 		if c.Ask == nil {
-			return map[string]any{"updated": false, "reason": "nobody was present to approve it, so nothing was done"}, nil
+			return map[string]any{"updated": false, "reason": "nobody was present to approve it, so nothing was done", "error": "nobody was present to approve it, so nothing was done"}, nil
 		}
 		if refused := c.Ask(ctx, question); refused != "" {
-			return map[string]any{"updated": false, "reason": refused}, nil
+			return map[string]any{"updated": false, "reason": refused, "error": refused}, nil
 		}
 	}
 	var tz string
@@ -727,10 +909,10 @@ func (c *Client) DeleteEvent(ctx context.Context, uid string) (map[string]any, e
 	}
 	question := fmt.Sprintf("Delete \u201c%s\u201d from your %s calendar, starting %s?", summary, found.calName, when)
 	if c.Ask == nil {
-		return map[string]any{"deleted": false, "reason": "nobody was present to approve it, so nothing was done"}, nil
+		return map[string]any{"deleted": false, "reason": "nobody was present to approve it, so nothing was done", "error": "nobody was present to approve it, so nothing was done"}, nil
 	}
 	if refused := c.Ask(ctx, question); refused != "" {
-		return map[string]any{"deleted": false, "reason": refused}, nil
+		return map[string]any{"deleted": false, "reason": refused, "error": refused}, nil
 	}
 	calc, err := c.calClient()
 	if err != nil {
@@ -810,7 +992,7 @@ func (c *Client) SearchContacts(ctx context.Context, query string, limit int) (m
 			}
 			haystack := strings.ToLower(strings.Join(append([]string{name}, append(emails, phones...)...), " "))
 			if strings.Contains(haystack, q) {
-				out = append(out, map[string]any{"name": name, "emails": emails, "phones": phones})
+				out = append(out, contactRow(card))
 			}
 			if len(out) >= limit {
 				break
@@ -824,6 +1006,102 @@ func (c *Client) SearchContacts(ctx context.Context, query string, limit int) (m
 		out = []map[string]any{}
 	}
 	return map[string]any{"count": len(out), "contacts": out}, nil
+}
+
+// contactRow is one card with every field an agent acts on. Empty fields
+// are omitted, never guessed.
+func contactRow(card vcard.Card) map[string]any {
+	row := map[string]any{
+		"name":   strings.TrimSpace(card.Value(vcard.FieldFormattedName)),
+		"emails": typedValues(card, vcard.FieldEmail),
+		"phones": typedValues(card, vcard.FieldTelephone),
+	}
+	for key, field := range map[string]string{"nickname": vcard.FieldNickname, "job_title": vcard.FieldTitle, "notes": vcard.FieldNote} {
+		if v := strings.TrimSpace(card.Value(field)); v != "" {
+			row[key] = v
+		}
+	}
+	// ORG is "Company;Department"; the company is what a reader means.
+	if org, _, _ := strings.Cut(card.Value(vcard.FieldOrganization), ";"); strings.TrimSpace(org) != "" {
+		row["organization"] = strings.TrimSpace(org)
+	}
+	if b := birthday(card.Value(vcard.FieldBirthday)); b != "" {
+		row["birthday"] = b
+	}
+	if urls := card.Values(vcard.FieldURL); len(urls) > 0 {
+		row["urls"] = urls
+	}
+	var addrs []map[string]any
+	for _, a := range card.Addresses() {
+		addr := map[string]any{"type": fieldType(card, a.Field)}
+		for key, v := range map[string]string{"street": a.StreetAddress, "extended": a.ExtendedAddress,
+			"po_box": a.PostOfficeBox, "city": a.Locality, "region": a.Region,
+			"postal_code": a.PostalCode, "country": a.Country} {
+			if v = strings.TrimSpace(v); v != "" {
+				addr[key] = v
+			}
+		}
+		addrs = append(addrs, addr)
+	}
+	if len(addrs) > 0 {
+		row["addresses"] = addrs
+	}
+	return row
+}
+
+// typedValues is every value of a field as {value, type}.
+func typedValues(card vcard.Card, key string) []map[string]any {
+	out := []map[string]any{}
+	for _, f := range card[key] {
+		if v := strings.TrimSpace(f.Value); v != "" {
+			out = append(out, map[string]any{"value": v, "type": fieldType(card, f)})
+		}
+	}
+	return out
+}
+
+// fieldType is a field's label: Apple's custom X-ABLabel for its group when
+// set, else the TYPE parameters without the ones that carry no meaning to a
+// reader (internet, pref, voice). "" when there is none.
+func fieldType(card vcard.Card, f *vcard.Field) string {
+	if f.Group != "" {
+		for _, label := range card["X-ABLABEL"] {
+			if label.Group == f.Group {
+				return strings.ToLower(strings.Trim(strings.TrimSuffix(strings.TrimPrefix(label.Value, "_$!<"), ">!$_"), " "))
+			}
+		}
+	}
+	var types []string
+	for _, t := range f.Params.Types() {
+		switch t = strings.ToLower(t); t {
+		case "internet", "pref", "voice", "x400":
+		default:
+			types = append(types, t)
+		}
+	}
+	return strings.Join(types, ",")
+}
+
+// birthday normalizes BDAY to YYYY-MM-DD, or --MM-DD when the card holds
+// no year (vCard 4's form, and Apple's 1604 placeholder year).
+func birthday(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return ""
+	}
+	if day, _, ok := strings.Cut(v, "T"); ok {
+		v = day
+	}
+	digits := strings.ReplaceAll(v, "-", "")
+	switch {
+	case strings.HasPrefix(v, "--") && len(digits) == 4:
+		return "--" + digits[:2] + "-" + digits[2:]
+	case len(digits) == 8 && strings.HasPrefix(digits, "1604"):
+		return "--" + digits[4:6] + "-" + digits[6:]
+	case len(digits) == 8:
+		return digits[:4] + "-" + digits[4:6] + "-" + digits[6:]
+	}
+	return v
 }
 
 // queryCardsIndividually lists a book's cards and fetches each one alone,

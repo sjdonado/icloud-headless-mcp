@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Config holds every environment input. Field comments name the source key
@@ -135,4 +136,17 @@ func hostZone() string {
 		return ""
 	}
 	return name
+}
+
+// ISOTime is the one timestamp format every tool returns: ISO 8601 with
+// seconds and the UTC offset, in the owner's zone, so an agent never has to
+// guess what zone a time is in.
+func ISOTime(t time.Time, owner *time.Location) string {
+	return t.In(owner).Format(time.RFC3339)
+}
+
+// ISODate is an all-day date: YYYY-MM-DD, no zone, because an all-day
+// event or due date is a calendar day wherever the owner is.
+func ISODate(t time.Time) string {
+	return t.Format("2006-01-02")
 }

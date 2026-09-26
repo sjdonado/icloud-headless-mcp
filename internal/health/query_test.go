@@ -537,3 +537,121 @@ func TestFailedRunReturnsProgress(t *testing.T) {
 		t.Fatalf("failed run should still return the committed file, got %+v", res)
 	}
 }
+
+// richDB holds samples with units, two sources, an awake stretch, and
+// heart-rate readings, for the provenance and richer-rollup fields.
+func richDB(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "health.sqlite")
+	db, err := OpenRW(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	root := t.TempDir()
+	line := func(uuid, metric, start, end, day, value, unit, source string) string {
+		return `{"uuid":"` + uuid + `","metric":"` + metric + `","recordType":"q","start":"` + start + `","end":"` + end +
+			`","localDate":"` + day + `","timezone":"Europe/Amsterdam","value":` + value + `,"unit":"` + unit + `","source":"` + source +
+			`","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"` + end + `","schemaVersion":1}` + "\n"
+	}
+	writeFile(t, filepath.Join(root, "StepCount", "2026-09.jsonl"),
+		line("s1", "StepCount", "2026-09-17T08:00:00+02:00", "2026-09-17T08:30:00+02:00", "2026-09-17", `{"amount":5000,"type":"quantity"}`, "count", "iPhone")+
+			line("s2", "StepCount", "2026-09-17T18:00:00+02:00", "2026-09-17T18:10:00+02:00", "2026-09-17", `{"amount":1000,"type":"quantity"}`, "count", "Watch"))
+	writeFile(t, filepath.Join(root, "HeartRate", "2026-09.jsonl"),
+		line("h1", "HeartRate", "2026-09-17T07:00:00+02:00", "2026-09-17T07:20:00+02:00", "2026-09-17", `{"amount":130,"type":"quantity"}`, "bpm", "Watch")+
+			line("h2", "HeartRate", "2026-09-17T09:00:00+02:00", "2026-09-17T09:05:00+02:00", "2026-09-17", `{"amount":70,"type":"quantity"}`, "bpm", "Watch"))
+	writeFile(t, filepath.Join(root, "SleepAnalysis", "2026-09.jsonl"),
+		line("n1", "SleepAnalysis", "2026-09-16T23:00:00+02:00", "2026-09-17T01:00:00+02:00", "2026-09-16", `{"code":2,"label":"core sleep","type":"category"}`, "", "Watch")+
+			line("n2", "SleepAnalysis", "2026-09-17T01:00:00+02:00", "2026-09-17T01:20:00+02:00", "2026-09-17", `{"code":1,"label":"awake","type":"category"}`, "", "Watch")+
+			line("n3", "SleepAnalysis", "2026-09-17T01:20:00+02:00", "2026-09-17T06:00:00+02:00", "2026-09-17", `{"code":4,"label":"deep sleep","type":"category"}`, "", "Watch"))
+	if _, err := ImportDir(db, root, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestHealthUnitsSourcesAndRicherRollups(t *testing.T) {
+	cfg := fixtureConfig(t, richDB(t))
+	n := windowSince(t, "2026-09-01")
+
+	status := Status(cfg)
+	steps, _ := status["metrics"].(map[string]any)["StepCount"].(map[string]any)
+	if steps["unit"] != "count" || strings.Join(steps["sources"].([]string), ",") != "Watch,iPhone" || status["timezone"] != "Europe/Amsterdam" {
+		t.Errorf("status StepCount = %v, timezone %v", steps, status["timezone"])
+	}
+
+	days := Days(cfg, n)
+	if u := days["units"].(map[string]any); u["steps"] != "count" || u["heart_rate"] != "bpm" || u["hrv"] != nil {
+		t.Errorf("units = %v", u)
+	}
+	if used := days["metrics_used"].(map[string]any); strings.Join(used["steps"].([]string), ",") != "StepCount" {
+		t.Errorf("metrics_used = %v", used)
+	}
+	for _, d := range days["days"].([]map[string]any) {
+		if d["date"] != "2026-09-17" {
+			continue
+		}
+		hr, _ := d["heart_rate"].(map[string]any)
+		if hr["min"] != 70.0 || hr["max"] != 130.0 || hr["avg"] != 100.0 || hr["samples"] != 2 {
+			t.Errorf("heart_rate = %v", d["heart_rate"])
+		}
+	}
+
+	sleep := Sleep(cfg, n)
+	night := sleep["nights"].([]map[string]any)[0]
+	for key, want := range map[string]any{"total_minutes": 420.0, "awake_minutes": 20.0, "asleep_minutes": 400.0,
+		"in_bed_minutes": nil, "segments": 3, "onset": "2026-09-16T23:00:00+02:00", "wake": "2026-09-17T06:00:00+02:00"} {
+		if night[key] != want {
+			t.Errorf("night %s = %#v, want %#v", key, night[key], want)
+		}
+	}
+
+	effort := Effort(cfg, n, 100)
+	for _, d := range effort["days"].([]map[string]any) {
+		if d["date"] == "2026-09-17" && (d["max_bpm"] != 130.0 || d["avg_bpm"] != 100.0 || d["samples"] != 2 || d["minutes_above_floor"] != 20.0) {
+			t.Errorf("effort day = %v", d)
+		}
+	}
+	if effort["unit"] != "bpm" {
+		t.Errorf("effort unit = %v", effort["unit"])
+	}
+
+	rec := Recovery(cfg, 7, n)
+	rows, err := SQL(cfg, "SELECT metric, value_num FROM samples WHERE metric = 'HeartRate'")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mcpserver.CheckOutput("health_sql", rows); err != nil {
+		t.Error(err)
+	}
+	for tool, payload := range map[string]map[string]any{"health_status": status, "health_days": days,
+		"health_sleep": sleep, "health_effort": effort, "health_recovery": rec} {
+		if err := mcpserver.CheckOutput(tool, payload); err != nil {
+			t.Error(err)
+		}
+	}
+	if w, _ := rec["recent_window"].(map[string]any); w["end"] == nil || w["start"] == nil {
+		t.Errorf("recent_window = %v", rec["recent_window"])
+	}
+}
+
+func TestHeartRateIgnoresDerivedSeries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "health.sqlite")
+	db, err := OpenRW(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, m := range []string{"HeartRate", "WalkingHeartRateAverage", "HeartRateRecoveryOneMinute"} {
+		if _, err := db.Exec(`INSERT INTO samples (uuid, metric, start_at, value_num, value_type) VALUES (?, ?, '2026-09-17T08:00:00Z', 1, 'quantity')`, m, m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resolved, _, err := resolveMetrics(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(resolved["hr"], ","); got != "HeartRate" {
+		t.Fatalf("hr resolves to %q, want HeartRate alone", got)
+	}
+}

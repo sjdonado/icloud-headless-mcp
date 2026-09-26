@@ -69,7 +69,7 @@ func productionRunner(cfg *config.Config) drain.Runner {
 				return map[string]any{"error": err.Error()}
 			}
 			rc.Ask = refuse
-			out, err := rc.Complete(ctx, str("title"), str("list_name"))
+			out, err := rc.Complete(ctx, str("title"), str("list_name"), str("id"))
 			if err != nil {
 				return map[string]any{"error": err.Error()}
 			}

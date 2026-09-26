@@ -86,7 +86,7 @@ What happens to a staged file afterwards is outside this server. It fetches, it 
 
 **An ISO offset is not a timezone.** A parsed offset is a fixed shift, and the calendar layer would serialise that by taking the wall clock and calling it UTC, which shifts an event silently. Offset-carrying values are converted into the named zone so the event carries a real TZID to write.
 
-**IMAP flags arrive after the literal**, so reading them off the first fetch marks every message unread. `unread` and `answered` each come from their own `UID SEARCH`.
+**IMAP flags can arrive after the header literal.** The old Python client read them off the first fetch and marked every message unread, so it asked two `UID SEARCH`es instead. go-imap parses every item of one FETCH response in any order, so listings read `FLAGS` from the same FETCH as the headers and the structure. The fake server sends `FLAGS` after the literal to keep that covered, and a live round on 2026-09-26 showed seen and unseen messages correctly.
 
 **Server-side mail search is not substring search, and cannot see an encoded header.** A MIME-encoded subject cannot match a plain word, uids come back in no particular order, and a shorter query can return fewer results than a longer one that contains it. So `search_mail` unions a server-side pass with a local pass over recent messages with headers decoded, sorts newest first rather than slicing, and reports `matched` and `scanned_recent` so a caller can tell a slice from a whole answer. `SEARCH FROM` is unreliable on the domain part: search the local part or a subject word, and treat an empty search as weak evidence.
 

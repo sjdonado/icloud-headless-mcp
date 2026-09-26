@@ -102,7 +102,11 @@ const ckSyncJS = `async ([zone, token, keys]) => {
       changed.push({n: rec.recordName, t: rec.recordType, del: v('Deleted') === 1, c: v('Completed') === 1,
                     cd: v('CompletionDate'), dd: v('DueDate'), cr: v('CreationDate'),
                     list: f.List && f.List.value && f.List.value.recordName, title: v('TitleDocument'),
-                    allday: v('AllDay') === 1, name: v('Name'), pri: v('Priority'), flag: v('Flagged') === 1});
+                    allday: v('AllDay') === 1, name: v('Name'), pri: v('Priority'), flag: v('Flagged') === 1,
+                    md: v('LastModifiedDate'), notes: v('NotesDocument'), tags: (v('HashtagIDs') || []).length, rrules: (v('RecurrenceRuleIDs') || []).length,
+                    rem: f.Reminder && f.Reminder.value && f.Reminder.value.recordName,
+                    alarm: f.Alarm && f.Alarm.value && f.Alarm.value.recordName,
+                    ttype: v('Type'), dc: v('DateComponentsData')});
     }
     token = z.syncToken;
     if (!z.moreComing) break;
@@ -411,7 +415,7 @@ const timeSegmentsJS = `() => {
   return JSON.stringify(out);
 }`
 
-const completeGeoJS = `(title) => {  ` + "%s" + `
+const completeGeoJS = `([title, id]) => {  ` + "%s" + `
   const want = title.toLowerCase();
   const hits = [];
   walk(document, 0, (el) => {
@@ -423,9 +427,11 @@ const completeGeoJS = `(title) => {  ` + "%s" + `
         t = (k.innerText||'').trim();
       }
     });
-    if (t && t.toLowerCase().includes(want)) hits.push({el, t});
+    // By id the row's DOM id must end in the record name exactly; by
+    // title a substring is enough, and ambiguity is refused below.
+    if (id ? (el.id || '').endsWith('Reminder/' + id) : (t && t.toLowerCase().includes(want))) hits.push({el, t});
   });
-  if (hits.length === 0) return JSON.stringify({error: 'no open reminder matching that title'});
+  if (hits.length === 0) return JSON.stringify({error: id ? 'no open reminder with that id among the rows the page has rendered; if list_reminders shows it, the list may be long enough that its row is not drawn yet' : 'no open reminder matching that title'});
   if (hits.length > 1) {
     return JSON.stringify({error: 'more than one open reminder matches',
                            candidates: hits.map((h) => h.t).slice(0, 8)});

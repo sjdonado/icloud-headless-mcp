@@ -59,6 +59,11 @@ func resolveMetrics(db *sql.DB) (map[string][]string, []string, error) {
 				continue
 			}
 			folded := norm(n)
+			// Derived series (walking average, one-minute recovery) are
+			// not heart-rate readings: mixed in, they skew min/max/avg.
+			if want.key == "hr" && (strings.Contains(folded, "average") || strings.Contains(folded, "recovery") || strings.Contains(folded, "walking")) {
+				continue
+			}
 			for _, tok := range want.tokens {
 				if strings.Contains(folded, tok) {
 					resolved[want.key] = append(resolved[want.key], n)
@@ -124,6 +129,94 @@ func meanDay(db *sql.DB, metrics []string, day string) (any, string) {
 	return v.Float64, ""
 }
 
+// metaIndex is what the stored samples say about each metric: its units
+// and the sources that recorded it, from one grouped query.
+type metaIndex map[string]struct{ units, sources map[string]bool }
+
+func loadMeta(db *sql.DB) (metaIndex, error) {
+	rows, err := db.Query(`SELECT metric, COALESCE(unit, ''), COALESCE(source, '') FROM samples GROUP BY metric, unit, source`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	idx := metaIndex{}
+	for rows.Next() {
+		var m, u, s string
+		if err := rows.Scan(&m, &u, &s); err != nil {
+			return nil, err
+		}
+		e, ok := idx[m]
+		if !ok {
+			e = struct{ units, sources map[string]bool }{map[string]bool{}, map[string]bool{}}
+			idx[m] = e
+		}
+		if u != "" {
+			e.units[u] = true
+		}
+		if s != "" {
+			e.sources[s] = true
+		}
+	}
+	return idx, rows.Err()
+}
+
+// meta is the unit of metrics (units joined when a renamed folder changed
+// it; nil when the samples carry none) and their sources.
+func (idx metaIndex) meta(metrics []string) (any, []string) {
+	units, sources := map[string]bool{}, map[string]bool{}
+	for _, m := range metrics {
+		for u := range idx[m].units {
+			units[u] = true
+		}
+		for s := range idx[m].sources {
+			sources[s] = true
+		}
+	}
+	if len(units) == 0 {
+		return nil, sortedKeys(sources)
+	}
+	return strings.Join(sortedKeys(units), ", "), sortedKeys(sources)
+}
+
+// tzOrNil is the owner's zone name, or nil when none is configured:
+// never a guessed UTC.
+func tzOrNil(cfg *config.Config) any {
+	if zone, err := cfg.LocalTimezone(); err == nil {
+		if _, err := time.LoadLocation(zone); err == nil {
+			return zone
+		}
+	}
+	return nil
+}
+
+// ownerLoc is the owner's zone, for rendering sample times. The rollups
+// that call it have already resolved the zone through ownerToday, which
+// fails the call when it cannot, so the UTC fallback is never shown.
+func ownerLoc(cfg *config.Config) *time.Location {
+	if zone, err := cfg.LocalTimezone(); err == nil {
+		if loc, err := time.LoadLocation(zone); err == nil {
+			return loc
+		}
+	}
+	return time.UTC
+}
+
+// hrDay is one day's heart-rate minimum, maximum and average, or nil
+// when the day has no heart-rate samples.
+func hrDay(db *sql.DB, metrics []string, day string) any {
+	if len(metrics) == 0 {
+		return nil
+	}
+	ph, args := inClause(metrics)
+	args = append(args, day)
+	var lo, hi, avg sql.NullFloat64
+	var n int
+	if err := db.QueryRow(`SELECT MIN(value_num), MAX(value_num), AVG(value_num), COUNT(value_num) FROM samples WHERE metric IN (`+ph+`) AND local_date=? AND value_type='quantity'`, args...).Scan(&lo, &hi, &avg, &n); err != nil || n == 0 {
+		return nil
+	}
+	return map[string]any{"min": lo.Float64, "max": hi.Float64, "avg": avg.Float64, "samples": n}
+}
+
 // Status reports coverage, freshness, and blind spots: every metric ever
 // seen with its span, every expected-but-absent metric named with its
 // reason, unapplied tombstones counted, and the last import run described.
@@ -156,6 +249,15 @@ func Status(cfg *config.Config) map[string]any {
 		return map[string]any{"error": err.Error()}
 	}
 	rows.Close()
+	meta, err := loadMeta(db)
+	if err != nil {
+		return map[string]any{"error": err.Error()}
+	}
+	for m, v := range metrics {
+		unit, sources := meta.meta([]string{m})
+		v.(map[string]any)["unit"] = unit
+		v.(map[string]any)["sources"] = sources
+	}
 	resolved, _, err := resolveMetrics(db)
 	if err != nil {
 		return map[string]any{"error": err.Error()}
@@ -227,6 +329,7 @@ func Status(cfg *config.Config) map[string]any {
 		"days_since_newest":     daysSince,
 		"stale":                 stale,
 		"metrics_present_count": present,
+		"timezone":              tzOrNil(cfg),
 	}
 }
 
@@ -260,6 +363,10 @@ func Days(cfg *config.Config, n int) map[string]any {
 	if err != nil {
 		return map[string]any{"error": err.Error()}
 	}
+	meta, err := loadMeta(db)
+	if err != nil {
+		return map[string]any{"error": err.Error()}
+	}
 	var days []map[string]any
 	for _, day := range lastNDays(today, n) {
 		row := map[string]any{"date": day}
@@ -267,9 +374,39 @@ func Days(cfg *config.Config, n int) map[string]any {
 		setMetricOrNull(row, "active_energy", resolved["energy"], func(m []string) (any, string) { return sumDay(db, m, day) })
 		setMetricOrNull(row, "resting_bpm", resolved["resting"], func(m []string) (any, string) { return minDay(db, m, day) })
 		setMetricOrNull(row, "hrv", resolved["hrv"], func(m []string) (any, string) { return meanDay(db, m, day) })
+		row["heart_rate"] = hrDay(db, resolved["hr"], day)
 		days = append(days, row)
 	}
-	return map[string]any{"days": days, "window_days": n}
+	fields := map[string]string{"steps": "steps", "active_energy": "energy", "resting_bpm": "resting", "hrv": "hrv", "heart_rate": "hr"}
+	units, used, sources := map[string]any{}, map[string]any{}, map[string]bool{}
+	for field, key := range fields {
+		unit, srcs := meta.meta(resolved[key])
+		units[field] = unit
+		used[field] = append([]string{}, resolved[key]...)
+		for _, s := range srcs {
+			sources[s] = true
+		}
+	}
+	return map[string]any{"days": days, "window_days": n, "units": units, "metrics_used": used, "sources": sortedKeys(sources),
+		"note": "steps and active_energy are day sums, resting_bpm the day's lowest reading, hrv and heart_rate.avg day means. A null is a day with no samples, never zero."}
+}
+
+// nilUnless is v when samples backed it, else nil: no labelled segment is
+// not a measured zero.
+func nilUnless(ok bool, v float64) any {
+	if !ok {
+		return nil
+	}
+	return v
+}
+
+func sortedKeys(m map[string]bool) []string {
+	out := []string{}
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func setMetricOrNull(row map[string]any, field string, metrics []string, f func([]string) (any, string)) {
@@ -308,6 +445,10 @@ func Sleep(cfg *config.Config, windowNights int) map[string]any {
 	if err != nil {
 		return map[string]any{"error": err.Error()}
 	}
+	meta, err := loadMeta(db)
+	if err != nil {
+		return map[string]any{"error": err.Error()}
+	}
 	m := resolved["sleep"]
 	if len(m) == 0 {
 		return map[string]any{"nights": []map[string]any{}, "window_nights": windowNights,
@@ -325,11 +466,12 @@ func Sleep(cfg *config.Config, windowNights int) map[string]any {
 	}
 	defer rows.Close()
 	type night struct {
-		date   string
-		onset  time.Time
-		wake   time.Time
-		stages map[string]float64
-		last   time.Time
+		date     string
+		onset    time.Time
+		wake     time.Time
+		stages   map[string]float64
+		last     time.Time
+		segments int
 	}
 	var episodes []*night
 	skipped := 0
@@ -365,6 +507,7 @@ func Sleep(cfg *config.Config, windowNights int) map[string]any {
 		if len(episodes) > 0 {
 			nt := episodes[len(episodes)-1]
 			if !start.After(nt.last.Add(3 * time.Hour)) {
+				nt.segments++
 				nt.stages[stage] += end.Sub(start).Minutes()
 				if end.After(nt.wake) {
 					nt.wake = end
@@ -378,33 +521,46 @@ func Sleep(cfg *config.Config, windowNights int) map[string]any {
 		if !attached {
 			episodes = append(episodes, &night{
 				date: nightDate, onset: start, wake: end,
-				stages: map[string]float64{stage: end.Sub(start).Minutes()},
-				last:   end,
+				stages:   map[string]float64{stage: end.Sub(start).Minutes()},
+				last:     end,
+				segments: 1,
 			})
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return map[string]any{"error": err.Error()}
 	}
+	loc := ownerLoc(cfg)
 	var res []map[string]any
 	for i := len(episodes) - 1; i >= 0 && len(res) < windowNights; i-- {
 		nt := episodes[i]
-		total := 0.0
+		total, awake, inBed := 0.0, 0.0, 0.0
+		sawAwake, sawInBed := false, false
 		stages := map[string]any{}
 		for label, mins := range nt.stages {
 			stages[label] = mins
 			total += mins
+			switch folded := norm(label); {
+			case strings.Contains(folded, "awake"):
+				awake, sawAwake = awake+mins, true
+			case strings.Contains(folded, "inbed"):
+				inBed, sawInBed = inBed+mins, true
+			}
 		}
 		res = append(res, map[string]any{
-			"night": nt.date, "onset": nt.onset.Format(time.RFC3339),
-			"wake":          nt.wake.Format(time.RFC3339),
+			"night": nt.date, "onset": config.ISOTime(nt.onset, loc),
+			"wake":          config.ISOTime(nt.wake, loc),
 			"total_minutes": total, "stages": stages,
+			"asleep_minutes": total - awake - inBed, "awake_minutes": nilUnless(sawAwake, awake), "in_bed_minutes": nilUnless(sawInBed, inBed),
+			"segments": nt.segments,
 		})
 	}
 	if res == nil {
 		res = []map[string]any{}
 	}
-	return map[string]any{"nights": res, "window_nights": windowNights, "skipped_segments": skipped}
+	_, sources := meta.meta(m)
+	return map[string]any{"nights": res, "window_nights": windowNights, "skipped_segments": skipped, "sources": sources,
+		"note": "onset and wake are ISO 8601 in the owner's zone; minutes are per stage label as the exporter wrote it. asleep_minutes excludes awake and in-bed labels."}
 }
 
 // nullString renders a nullable text column: NULL stays nil in JSON
@@ -433,6 +589,10 @@ func Effort(cfg *config.Config, n, floor int) map[string]any {
 	if err != nil {
 		return map[string]any{"error": err.Error()}
 	}
+	meta, err := loadMeta(db)
+	if err != nil {
+		return map[string]any{"error": err.Error()}
+	}
 	m := resolved["hr"]
 	if len(m) == 0 {
 		return map[string]any{"days": []map[string]any{}, "floor_bpm": floor, "window_days": n,
@@ -446,7 +606,7 @@ func Effort(cfg *config.Config, n, floor int) map[string]any {
 		if err != nil {
 			return map[string]any{"error": err.Error()}
 		}
-		minutes := 0.0
+		minutes, maxBPM, sumBPM := 0.0, 0.0, 0.0
 		samples := 0
 		skipped := 0
 		for rows.Next() {
@@ -461,6 +621,8 @@ func Effort(cfg *config.Config, n, floor int) map[string]any {
 				continue
 			}
 			samples++
+			sumBPM += v.Float64
+			maxBPM = max(maxBPM, v.Float64)
 			if v.Float64 < float64(floor) {
 				continue
 			}
@@ -476,13 +638,17 @@ func Effort(cfg *config.Config, n, floor int) map[string]any {
 		row := map[string]any{"date": day}
 		if samples == 0 {
 			row["minutes_above_floor"] = nil
+			row["max_bpm"], row["avg_bpm"] = nil, nil
 		} else {
 			row["minutes_above_floor"] = minutes
+			row["max_bpm"], row["avg_bpm"] = maxBPM, sumBPM/float64(samples)
 		}
+		row["samples"] = samples
 		row["skipped_samples"] = skipped
 		days = append(days, row)
 	}
-	return map[string]any{"days": days, "floor_bpm": floor, "window_days": n}
+	unit, sources := meta.meta(m)
+	return map[string]any{"days": days, "floor_bpm": floor, "window_days": n, "unit": unit, "sources": sources}
 }
 
 // Recovery compares recent-window means against baseline means for resting
@@ -501,6 +667,10 @@ func Recovery(cfg *config.Config, recent, baseline int) map[string]any {
 		return map[string]any{"error": err.Error()}
 	}
 	resolved, _, err := resolveMetrics(db)
+	if err != nil {
+		return map[string]any{"error": err.Error()}
+	}
+	meta, err := loadMeta(db)
 	if err != nil {
 		return map[string]any{"error": err.Error()}
 	}
@@ -554,12 +724,20 @@ func Recovery(cfg *config.Config, recent, baseline int) map[string]any {
 		}
 		if r != nil && b != nil {
 			m["delta"] = r.(float64) - b.(float64)
+			if bv := b.(float64); bv != 0 {
+				m["delta_percent"] = (r.(float64) - bv) / bv * 100
+			}
 		} else {
 			m["delta"] = nil
 		}
+		m["unit"], _ = meta.meta(metrics)
 		return m
 	}
 	outRecovery := map[string]any{"recent_days": recent, "baseline_days": baseline}
+	if len(recentDays) > 0 && len(all) > 0 {
+		outRecovery["recent_window"] = map[string]any{"start": recentDays[0], "end": recentDays[len(recentDays)-1]}
+		outRecovery["baseline_window"] = map[string]any{"start": all[0], "end": all[len(all)-1]}
+	}
 	if capped {
 		outRecovery["note"] = "recent window capped at the baseline window"
 	}

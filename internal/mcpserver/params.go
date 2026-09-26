@@ -21,6 +21,7 @@ const (
 	eventUID  = "the event uid, from list_events"
 	calName   = "calendar name, from list_calendars"
 	noteTitle = "the note title, as notes_list or notes_search shows it"
+	noteID    = "the note id, from notes_list"
 	noteMatch = "which of several notes with this title, from the candidates an ambiguous call returns"
 	listName  = "reminder list name, from reminder_lists"
 	mailbox   = "mailbox name, from list_mailboxes; default INBOX"
@@ -70,6 +71,7 @@ var ToolParams = map[string][]Param{
 		req("uid", "string", mailUID),
 		opt("mailbox", "string", mailbox),
 		opt("save_attachments", "boolean", "save allowed attachments to MAIL_ATTACHMENTS_DIR; default false"),
+		opt("offset", "number", "character offset into the body, from a previous call's next_offset; default 0"),
 	},
 	"search_mail": {
 		req("query", "string", "text to find in sender, subject or body"),
@@ -85,13 +87,16 @@ var ToolParams = map[string][]Param{
 	},
 	"notes_list": {opt("folder", "string", "only this folder, from notes_folders"), opt("limit", "number", "default 25")},
 	"notes_read": {
-		req("title", "string", noteTitle),
+		opt("id", "string", noteID+"; reads the note's own record, with checklist and attachments, and replaces title"),
+		opt("title", "string", noteTitle+"; when there is no id"),
 		opt("folder", "string", "narrow to this folder"),
 		opt("match", "number", noteMatch),
+		opt("offset", "number", "character offset into the text, from a previous call's next_offset; default 0"),
 	},
 	"notes_search": {req("query", "string", "text to find in titles and bodies"), opt("limit", "number", "default 15")},
 	"update_note": {
-		req("title", "string", noteTitle),
+		opt("id", "string", noteID+"; replaces title and folder"),
+		opt("title", "string", noteTitle+"; when there is no id"),
 		req("body", "string", "the new full body; it replaces the old one"),
 		opt("folder", "string", "narrow to this folder"),
 		opt("match", "number", noteMatch),
@@ -101,7 +106,7 @@ var ToolParams = map[string][]Param{
 		opt("body", "string", "the text below the title"),
 		opt("folder", "string", "folder to create it in, from notes_folders"),
 	},
-	"list_reminders": {req("list_name", "string", listName)},
+	"list_reminders": {opt("list_name", "string", listName+"; default every list")},
 	"completed_reminders": {
 		opt("list_name", "string", "only this list, from reminder_lists"),
 		opt("since", "string", "completed on or after this day, YYYY-MM-DD"),
@@ -109,8 +114,9 @@ var ToolParams = map[string][]Param{
 		opt("limit", "number", "default 50"),
 	},
 	"complete_reminder": {
-		req("title", "string", "the reminder title, as list_reminders shows it"),
-		req("list_name", "string", listName),
+		opt("id", "string", "the reminder id from list_reminders; completes exactly that reminder, and replaces title and list_name"),
+		opt("title", "string", "the reminder title, as list_reminders shows it; with list_name when there is no id"),
+		opt("list_name", "string", listName),
 	},
 	"create_reminder": {
 		req("title", "string", "the reminder title"),

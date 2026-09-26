@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sjdonado/icloud-headless-mcp/internal/config"
+	"github.com/sjdonado/icloud-headless-mcp/internal/mcpserver"
 )
 
 var fixedNow = time.Date(2026, time.March, 1, 12, 0, 0, 0, time.FixedZone("CET", 3600))
@@ -86,14 +87,14 @@ func TestListEventsInstanceDate(t *testing.T) {
 			standup = e["start"].(string)
 		}
 	}
-	if standup != "2026-03-09T09:00+01:00" {
+	if standup != "2026-03-09T09:00:00+01:00" {
 		t.Fatalf("Standup start = %q, want the 03-09 instance, not the master", standup)
 	}
 	if len(events) != 4 {
 		t.Fatalf("count = %d, want 4 (solo, attended, stray, instance)", len(events))
 	}
 	win, _ := out["window"].(map[string]any)
-	if win["start"] != "2026-03-09T00:00+01:00" || win["absolute"] != true {
+	if win["start"] != "2026-03-09T00:00:00+01:00" || win["absolute"] != true {
 		t.Fatalf("window = %v", win)
 	}
 	// The client asked for expansion: the REPORT body carries <C:expand>.
@@ -146,10 +147,10 @@ func TestCreateEventConvertsOffset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateEvent: %v", err)
 	}
-	if out["stored_start"] != "2026-03-10T21:00+01:00" {
+	if out["stored_start"] != "2026-03-10T21:00:00+01:00" {
 		t.Fatalf("stored_start = %v", out["stored_start"])
 	}
-	if out["stored_end"] != "2026-03-10T22:00+01:00" {
+	if out["stored_end"] != "2026-03-10T22:00:00+01:00" {
 		t.Fatalf("stored_end = %v (want default one hour)", out["stored_end"])
 	}
 	if out["calendar"] != "Personal" || out["created"] != true {
@@ -334,8 +335,8 @@ func TestDeleteDeclineWritesNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DeleteEvent: %v", err)
 	}
-	if out["deleted"] != false {
-		t.Fatalf("result = %v", out)
+	if out["deleted"] != false || out["error"] == nil {
+		t.Fatalf("result = %v; a refusal must carry error so it reads as isError", out)
 	}
 	if len(fake.deleted) != 0 {
 		t.Fatalf("declined delete still deleted: %v", fake.deleted)
@@ -486,5 +487,204 @@ func TestCalendarQueryNamesProps(t *testing.T) {
 	}
 	if q.CompRequest.Expand == nil {
 		t.Fatal("listing queries must expand recurrences")
+	}
+}
+
+const (
+	fxMeeting = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\n" +
+		"BEGIN:VEVENT\r\nUID:meet-1\r\nDTSTAMP:20260301T120000Z\r\n" +
+		"DTSTART;TZID=Europe/Amsterdam:20260313T100000\r\nDURATION:PT45M\r\n" +
+		"SUMMARY:Budget review\r\nLOCATION:Room 4\\, floor 2\r\n" +
+		"DESCRIPTION:Agenda:\\n1. numbers\r\nSTATUS:CONFIRMED\r\nURL:https://example.com/m/1\r\n" +
+		"CREATED:20260201T080000Z\r\nLAST-MODIFIED:20260228T160000Z\r\n" +
+		"ORGANIZER;CN=Carol:mailto:carol@example.com\r\n" +
+		"ATTENDEE;CN=Alice;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED:mailto:alice@example.com\r\n" +
+		"ATTENDEE;CN=Bob:mailto:bob@example.com\r\n" +
+		"BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT15M\r\nEND:VALARM\r\n" +
+		"BEGIN:VALARM\r\nACTION:AUDIO\r\nTRIGGER;VALUE=DATE-TIME:20260313T080000Z\r\nEND:VALARM\r\n" +
+		"END:VEVENT\r\nEND:VCALENDAR\r\n"
+
+	fxHoliday = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\n" +
+		"BEGIN:VEVENT\r\nUID:holiday-1\r\nDTSTAMP:20260301T120000Z\r\n" +
+		"DTSTART;VALUE=DATE:20260314\r\nDTEND;VALUE=DATE:20260316\r\n" +
+		"SUMMARY:Weekend away\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+
+	// Three days over the October DST change, as DURATION, with an
+	// unescaped comma and an end-relative alarm.
+	fxTrip = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\n" +
+		"BEGIN:VEVENT\r\nUID:trip-1\r\nDTSTAMP:20260301T120000Z\r\n" +
+		"DTSTART;VALUE=DATE:20261024\r\nDURATION:P3D\r\n" +
+		"SUMMARY:Trip\r\nDESCRIPTION:Bring snacks, drinks and chairs\r\n" +
+		"ORGANIZER:Mailto:dana@example.com\r\n" +
+		"BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER;RELATED=END:PT0S\r\nEND:VALARM\r\n" +
+		"END:VEVENT\r\nEND:VCALENDAR\r\n"
+
+	fxWeeklyMaster = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\n" +
+		"BEGIN:VEVENT\r\nUID:weekly-1\r\nDTSTAMP:20260301T120000Z\r\n" +
+		"DTSTART;TZID=Europe/Amsterdam:20260105T090000\r\n" +
+		"DTEND;TZID=Europe/Amsterdam:20260105T093000\r\n" +
+		"RRULE:FREQ=WEEKLY;BYDAY=MO\r\nSUMMARY:Standup\r\n" +
+		"END:VEVENT\r\nEND:VCALENDAR\r\n"
+)
+
+func eventsByUID(t *testing.T, out map[string]any) map[string]map[string]any {
+	t.Helper()
+	byUID := map[string]map[string]any{}
+	events, _ := out["events"].([]map[string]any)
+	for _, e := range events {
+		if _, dup := byUID[e["uid"].(string)]; dup {
+			t.Fatalf("uid %v listed twice", e["uid"])
+		}
+		byUID[e["uid"].(string)] = e
+	}
+	return byUID
+}
+
+func TestListEventsRichFields(t *testing.T) {
+	fake, srv := newFakeDAV(t)
+	defer srv.Close()
+	fake.objects[fakePersonal+"meet-1.ics"] = fxMeeting
+	fake.objects[fakePersonal+"holiday-1.ics"] = fxHoliday
+	fake.objects[fakePersonal+"trip-1.ics"] = fxTrip
+	fake.objects[fakePersonal+"day-1.ics"] = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\n" +
+		"BEGIN:VEVENT\r\nUID:day-1\r\nDTSTAMP:20260301T120000Z\r\nDTSTART;VALUE=DATE:20260312\r\n" +
+		"SUMMARY:No end\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+	fake.unexpanded[fakePersonal+"weekly-9.ics"] = fxWeeklyMaster
+	c := testClient(t, fake, srv.URL, failOnAsk(t))
+	out, err := c.ListEvents(context.Background(), 0, 0, nil, strptr("2026-03-09"), strptr("2026-03-15"))
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if err := mcpserver.CheckOutput("list_events", out); err != nil {
+		t.Fatal(err)
+	}
+	byUID := eventsByUID(t, out)
+
+	m := byUID["meet-1"]
+	for key, want := range map[string]any{
+		"start": "2026-03-13T10:00:00+01:00", "end": "2026-03-13T10:45:00+01:00", "all_day": false,
+		"location": "Room 4, floor 2", "description": "Agenda:\n1. numbers", "status": "confirmed",
+		"url": "https://example.com/m/1", "created": "2026-02-01T09:00:00+01:00",
+		"last_modified": "2026-02-28T17:00:00+01:00",
+	} {
+		if m[key] != want {
+			t.Errorf("meeting %s = %#v, want %#v", key, m[key], want)
+		}
+	}
+	if org, _ := m["organizer"].(map[string]any); org["name"] != "Carol" || org["address"] != "carol@example.com" {
+		t.Errorf("organizer = %v", m["organizer"])
+	}
+	att, _ := m["attendees"].([]map[string]any)
+	if len(att) != 2 || att[0]["participation"] != "accepted" || att[1]["participation"] != "needs-action" ||
+		att[1]["name"] != "Bob" || att[1]["role"] != "req-participant" {
+		t.Errorf("attendees = %v", att)
+	}
+	alarms, _ := m["alarms"].([]map[string]any)
+	if len(alarms) != 2 || alarms[0]["offset"] != "-PT15M" || alarms[0]["action"] != "display" ||
+		alarms[1]["at"] != "2026-03-13T09:00:00+01:00" {
+		t.Errorf("alarms = %v", alarms)
+	}
+
+	h := byUID["holiday-1"]
+	if h["all_day"] != true || h["start"] != "2026-03-14" || h["end"] != "2026-03-15" {
+		t.Errorf("all-day = start %v end %v all_day %v, want 03-14..03-15 inclusive", h["start"], h["end"], h["all_day"])
+	}
+
+	if d := byUID["day-1"]; d["start"] != "2026-03-12" || d["end"] != "2026-03-12" || d["all_day"] != true {
+		t.Errorf("date event with no end = %v, want the one day", d)
+	}
+	trip := byUID["trip-1"]
+	if trip["start"] != "2026-10-24" || trip["end"] != "2026-10-26" {
+		t.Errorf("DST all-day = %v..%v, want 2026-10-24..2026-10-26", trip["start"], trip["end"])
+	}
+	if trip["description"] != "Bring snacks, drinks and chairs" {
+		t.Errorf("unescaped comma cut the text: %q", trip["description"])
+	}
+	if org, _ := trip["organizer"].(map[string]any); org["address"] != "dana@example.com" {
+		t.Errorf("organizer = %v", trip["organizer"])
+	}
+	if a, _ := trip["alarms"].([]map[string]any); len(a) != 1 || a[0]["related"] != "end" {
+		t.Errorf("end-relative alarm = %v", trip["alarms"])
+	}
+
+	w := byUID["weekly-1"]
+	if w["recurring_instance"] != true || w["recurrence_rule"] != "FREQ=WEEKLY;BYDAY=MO" {
+		t.Errorf("weekly = %v, want the instance flagged with the series rule", w)
+	}
+	if _, ok := byUID["solo-1"]["recurring_instance"]; ok {
+		t.Error("a one-off event is flagged as a recurring instance")
+	}
+	if _, ok := byUID["solo-1"]["attendees"]; ok {
+		t.Error("an event without attendees lists attendees")
+	}
+}
+
+func TestListEventsMergesSharedUID(t *testing.T) {
+	fake, srv := newFakeDAV(t)
+	defer srv.Close()
+	fake.shared = true
+	fake.objects[fakeShared+"copy.ics"] = fxSolo
+	c := testClient(t, fake, srv.URL, failOnAsk(t))
+	out, err := c.ListEvents(context.Background(), 0, 0, nil, strptr("2026-03-09"), strptr("2026-03-15"))
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	cals, _ := eventsByUID(t, out)["solo-1"]["calendars"].([]string)
+	if strings.Join(cals, ",") != "Personal,Shared" {
+		t.Fatalf("calendars = %v, want both", cals)
+	}
+	if out["count"] != 4 {
+		t.Fatalf("count = %v, want 4 (the shared copy merged)", out["count"])
+	}
+}
+
+func TestSearchContactsRichFields(t *testing.T) {
+	fake, srv := newFakeDAV(t)
+	defer srv.Close()
+	fake.objects[fakeBook+"lin.vcf"] = "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Lin Chen\r\nN:Chen;Lin;;;\r\n" +
+		"NICKNAME:Linny\r\nORG:Acme Corp;R&D\r\nTITLE:Staff Engineer\r\nBDAY:1990-04-02\r\n" +
+		"EMAIL;TYPE=INTERNET,WORK,pref:lin@acme.test\r\nTEL;TYPE=CELL,VOICE:+15550001111\r\n" +
+		"item1.TEL:+15550002222\r\nitem1.X-ABLabel:_$!<Assistant>!$_\r\n" +
+		"ADR;TYPE=WORK:;Suite 5;1 Main St;Springfield;IL;62701;USA\r\n" +
+		"URL:https://acme.test/lin\r\nNOTE:Met at the conference\r\nEND:VCARD\r\n"
+	fake.objects[fakeBook+"noyear.vcf"] = "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Sam Noyear\r\n" +
+		"BDAY;X-APPLE-OMIT-YEAR=1604:1604-11-05\r\nEND:VCARD\r\n"
+	c := testClient(t, fake, srv.URL, failOnAsk(t))
+	out, err := c.SearchContacts(context.Background(), "lin chen", 10)
+	if err != nil {
+		t.Fatalf("SearchContacts: %v", err)
+	}
+	if err := mcpserver.CheckOutput("search_contacts", out); err != nil {
+		t.Fatal(err)
+	}
+	contacts, _ := out["contacts"].([]map[string]any)
+	if len(contacts) != 1 {
+		t.Fatalf("contacts = %v", contacts)
+	}
+	got := contacts[0]
+	for key, want := range map[string]any{"nickname": "Linny", "organization": "Acme Corp",
+		"job_title": "Staff Engineer", "birthday": "1990-04-02", "notes": "Met at the conference"} {
+		if got[key] != want {
+			t.Errorf("%s = %#v, want %#v", key, got[key], want)
+		}
+	}
+	emails, _ := got["emails"].([]map[string]any)
+	if len(emails) != 1 || emails[0]["value"] != "lin@acme.test" || emails[0]["type"] != "work" {
+		t.Errorf("emails = %v", emails)
+	}
+	phones, _ := got["phones"].([]map[string]any)
+	if len(phones) != 2 || phones[0]["type"] != "cell" || phones[1]["type"] != "assistant" {
+		t.Errorf("phones = %v", phones)
+	}
+	addrs, _ := got["addresses"].([]map[string]any)
+	if len(addrs) != 1 || addrs[0]["city"] != "Springfield" || addrs[0]["street"] != "1 Main St" || addrs[0]["type"] != "work" {
+		t.Errorf("addresses = %v", addrs)
+	}
+	if urls, _ := got["urls"].([]string); len(urls) != 1 {
+		t.Errorf("urls = %v", got["urls"])
+	}
+	out, _ = c.SearchContacts(context.Background(), "noyear", 10)
+	if contacts, _ := out["contacts"].([]map[string]any); len(contacts) != 1 || contacts[0]["birthday"] != "--11-05" {
+		t.Errorf("year-less birthday = %v", out["contacts"])
 	}
 }

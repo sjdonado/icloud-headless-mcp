@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
 
@@ -360,5 +361,179 @@ func TestEveryHandlerArgumentIsDeclared(t *testing.T) {
 				t.Errorf("%s reads argument %q, which no tool declares in ToolParams", f, u)
 			}
 		}
+	}
+}
+
+func TestResultJSONEnvelope(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		payload any
+		isError bool
+	}{
+		{"success", map[string]any{"count": 1}, false},
+		{"empty error key is not a failure", map[string]any{"error": ""}, false},
+		{"error", map[string]any{"error": "boom"}, true},
+		{"needs_login", map[string]any{"error": "signed out: run open_login", "needs_login": true}, true},
+		{"needs_device_approval", map[string]any{"error": "grant lapsed", "needs_device_approval": true}, true},
+	} {
+		res, err := ResultJSON(tc.payload)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if res.IsError != tc.isError {
+			t.Errorf("%s: isError = %v, want %v", tc.name, res.IsError, tc.isError)
+		}
+		obj, ok := res.StructuredContent.(map[string]any)
+		if !ok {
+			t.Fatalf("%s: structuredContent = %T, want an object", tc.name, res.StructuredContent)
+		}
+		text, _ := json.Marshal(obj)
+		if got := res.Content[0].(mcp.TextContent).Text; got != string(text) {
+			t.Errorf("%s: text block %s differs from structuredContent %s", tc.name, got, text)
+		}
+		for _, key := range []string{"needs_login", "needs_device_approval"} {
+			if want, ok := tc.payload.(map[string]any)[key]; ok && obj[key] != want {
+				t.Errorf("%s: %s dropped from the payload", tc.name, key)
+			}
+		}
+	}
+	res, _ := ErrorResult("bad argument")
+	if !res.IsError {
+		t.Fatal("ErrorResult must set isError")
+	}
+}
+
+func TestEveryToolDeclaresAnnotations(t *testing.T) {
+	c := newWireClient(t)
+	c.nextID++
+	c.send(map[string]any{"jsonrpc": "2.0", "id": c.nextID, "method": "tools/list"})
+	msg := c.recv("tools/list response")
+	tiers := map[string]Tier{}
+	for _, def := range Tools {
+		tiers[def.Name] = def.Tier
+	}
+	tools, _ := msg["result"].(map[string]any)["tools"].([]any)
+	for _, item := range tools {
+		tool, _ := item.(map[string]any)
+		name, _ := tool["name"].(string)
+		ann, _ := tool["annotations"].(map[string]any)
+		for _, hint := range []string{"readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"} {
+			if _, ok := ann[hint].(bool); !ok {
+				t.Errorf("%s: %s not declared (the protocol default would apply)", name, hint)
+			}
+		}
+		if tiers[name] == TierReadOnly && (ann["readOnlyHint"] != true || ann["destructiveHint"] != false) {
+			t.Errorf("%s is read only but annotated %v", name, ann)
+		}
+		switch name {
+		case "delete_event", "update_event", "update_note", "sign_out":
+			if ann["destructiveHint"] != true {
+				t.Errorf("%s overwrites or removes data but is not destructive on the wire: %v", name, ann)
+			}
+		case "complete_reminder":
+			if ann["idempotentHint"] != false {
+				t.Errorf("complete_reminder is idempotent on the wire, but a repeat completes the next occurrence")
+			}
+		}
+	}
+	for _, set := range []map[string]bool{destructiveTools, idempotentTools} {
+		for name := range set {
+			if tiers[name] == "" || tiers[name] == TierReadOnly {
+				t.Errorf("write hint on %q, which is unknown or read only", name)
+			}
+		}
+	}
+}
+
+func TestEveryToolDeclaresOutputSchema(t *testing.T) {
+	for _, def := range Tools {
+		s, ok := ToolOutputs[def.Name]
+		if !ok || s["type"] != "object" {
+			t.Errorf("%s has no object output schema", def.Name)
+		}
+	}
+	if len(ToolOutputs) != len(Tools) {
+		t.Errorf("%d schemas for %d tools: a schema names a tool that does not exist", len(ToolOutputs), len(Tools))
+	}
+}
+
+// The README's "What a call returns" examples are payloads a reader will
+// copy: they must validate against the schemas the server declares.
+func TestReadmeExamplesMatchSchemas(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "README.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary := regexp.MustCompile("(?s)<summary><code>([a-z_]+)</code>.*?</summary>(.*?)</details>")
+	block := regexp.MustCompile("(?s)```json\n(.*?)```")
+	checked := 0
+	for _, m := range summary.FindAllStringSubmatch(string(raw), -1) {
+		tools := []string{m[1]}
+		if m[1] == "notes_list" {
+			tools = []string{"notes_list", "notes_read"} // one section shows both calls, in order
+		}
+		for i, b := range block.FindAllStringSubmatch(m[2], -1) {
+			if i >= len(tools) {
+				break
+			}
+			var payload any
+			if err := json.Unmarshal([]byte(b[1]), &payload); err != nil {
+				t.Errorf("%s README example is not JSON: %v", tools[i], err)
+				continue
+			}
+			if err := CheckOutput(tools[i], payload); err != nil {
+				t.Errorf("README example: %v", err)
+			}
+			checked++
+		}
+	}
+	if checked < 7 {
+		t.Fatalf("checked %d README examples, want every one of the 7", checked)
+	}
+}
+
+func TestCheckOutputCatchesWrongType(t *testing.T) {
+	if err := CheckOutput("list_events", map[string]any{"count": "two"}); err == nil {
+		t.Fatal("a string count validated as an integer")
+	}
+	if err := CheckOutput("health_days", map[string]any{"days": []any{map[string]any{"steps": nil}}}); err != nil {
+		t.Fatalf("a null steps value is allowed: %v", err)
+	}
+}
+
+// A tool whose output schema carries a time must say which zone it is in,
+// and a tool that pages text must say how to continue. Derived from the
+// schemas, so a new dated field cannot slip past a hand-kept list.
+func TestDatedToolDescriptionsNameTheZone(t *testing.T) {
+	var carries func(v any, want schema) bool
+	carries = func(v any, want schema) bool {
+		switch v := v.(type) {
+		case schema:
+			if v["description"] == want["description"] && v["type"] == want["type"] {
+				return true
+			}
+			for _, child := range v {
+				if carries(child, want) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	dated := 0
+	for _, def := range Tools {
+		out := ToolOutputs[def.Name]
+		if carries(out, tISO) {
+			dated++
+			if !strings.Contains(def.Description, "zone") {
+				t.Errorf("%s returns times but its description does not name the zone: %q", def.Name, def.Description)
+			}
+		}
+		if props, _ := out["properties"].(schema); props["next_offset"] != nil && !strings.Contains(def.Description, "offset") {
+			t.Errorf("%s pages its text but its description does not say how to continue", def.Name)
+		}
+	}
+	if dated < 8 {
+		t.Fatalf("only %d tools carry a time: the walk is broken", dated)
 	}
 }

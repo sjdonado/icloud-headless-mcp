@@ -29,9 +29,16 @@ type fakeDAV struct {
 	// PUT bodies by path, for asserting SEQUENCE bumps and in-place writes.
 	puts    map[string]string
 	deleted []string
+	// unexpanded replaces an object's body for REPORTs that do not ask
+	// for expansion: the series master, where the expanded body is one
+	// instance.
+	unexpanded map[string]string
+	// shared adds a second event calendar, for the same-uid-twice case.
+	shared bool
 }
 
 const (
+	fakeShared   = "/calendars/Shared/"
 	fakePersonal = "/calendars/Personal/"
 	fakeLegacy   = "/calendars/LegacyReminders/"
 	fakeBook     = "/books/Home/"
@@ -93,8 +100,9 @@ func newFakeDAV(t *testing.T) (*fakeDAV, *httptest.Server) {
 			fakeBook + "grace.vcf":        fxGrace,
 			fakePersonal + "weekly-9.ics": fxWeeklyInstance,
 		},
-		reports: map[string][]string{},
-		puts:    map[string]string{},
+		reports:    map[string][]string{},
+		puts:       map[string]string{},
+		unexpanded: map[string]string{},
 	}
 	return f, httptest.NewServer(f)
 }
@@ -137,9 +145,12 @@ func (f *fakeDAV) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				`<A:addressbook-home-set><D:href>/books/</D:href></A:addressbook-home-set>`+
 				`</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>`)
 		case "/calendars/":
-			f.multistatus(w,
-				calResponse(fakePersonal, "Personal", "VEVENT"),
-				calResponse(fakeLegacy, "LegacyReminders", "VTODO"))
+			cals := []string{calResponse(fakePersonal, "Personal", "VEVENT"),
+				calResponse(fakeLegacy, "LegacyReminders", "VTODO")}
+			if f.shared {
+				cals = append(cals, calResponse(fakeShared, "Shared", "VEVENT"))
+			}
+			f.multistatus(w, cals...)
 		case "/books/":
 			f.multistatus(w, `<D:response><D:href>`+fakeBook+`</D:href><D:propstat><D:prop>`+
 				`<D:resourcetype><D:collection/><A:addressbook/></D:resourcetype>`+
@@ -157,6 +168,9 @@ func (f *fakeDAV) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			for href, ics := range f.objects {
 				if !strings.HasPrefix(href, path) || !strings.HasSuffix(href, ".ics") {
 					continue
+				}
+				if master, ok := f.unexpanded[href]; ok && !strings.Contains(string(body), "expand") {
+					ics = master
 				}
 				responses = append(responses,
 					`<D:response><D:href>`+href+`</D:href><D:propstat><D:prop>`+
