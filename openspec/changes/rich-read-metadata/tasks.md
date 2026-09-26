@@ -47,4 +47,4 @@
 - [x] 7.1 Local ladder: `gofmt -l .`, `go vet ./...`, `go test ./...`, linux amd64 and arm64 builds, and the suite in `golang:bookworm`; verify: all green
 - [x] 7.2 One live round with `./verify.sh` against the real account per AGENTS.md: every read tool raw over stdio, recording the "after" payload and wall time next to 1.1, plus `complete_reminder` by id on a marker reminder; verify: the before/after table
 - [x] 7.3 README tools table and descriptions, AGENTS.md happy-path keys, SECURITY.md untrusted-input note where it changes; verify: docs name the new fields and the `isError` change
-- [ ] 7.4 PR body lists each tool's before and after payload and timing, and every breaking field change; verify: the PR
+- [x] 7.4 PR body lists each tool's before and after payload and timing, and every breaking field change; verify: the PR
