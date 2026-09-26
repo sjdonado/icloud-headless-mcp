@@ -427,3 +427,16 @@ func TestCloseDoorSparesAnExitedDoorsPid(t *testing.T) {
 		t.Fatal("closeDoor signalled the pid of a door it had seen exit")
 	}
 }
+
+func TestSignOutUnreachableRefusesWithoutAsk(t *testing.T) {
+	state, _ := testState(t)
+	asked := false
+	res, rerr := signOut(context.Background(), state, func(context.Context, string) string {
+		asked = true
+		return ""
+	})
+	m := resultMap(t, res, rerr)
+	if m["signed_out"] != false || asked {
+		t.Fatalf("no browser should refuse before asking: %v asked=%v", m, asked)
+	}
+}

@@ -11,6 +11,11 @@
   header { display: flex; gap: 12px; align-items: center; padding: 8px 16px; }
   header span { color: var(--muted); flex: 1; }
   button { font: inherit; padding: 4px 10px; }
+  #paste-dialog { border: none; border-radius: 14px; padding: 20px; width: min(420px, calc(100vw - 32px)); box-sizing: border-box; background: var(--bg); color: var(--fg); box-shadow: 0 12px 40px rgba(0,0,0,.25); }
+  #paste-dialog::backdrop { background: rgba(0,0,0,.35); }
+  #paste-dialog p { margin: 0 0 12px; color: var(--muted); line-height: 1.4; }
+  #paste-input { width: 100%; box-sizing: border-box; font: inherit; padding: 8px 10px; border: 1px solid var(--muted); border-radius: 8px; background: transparent; color: var(--fg); }
+  #paste-dialog menu { display: flex; justify-content: flex-end; gap: 8px; margin: 14px 0 0; padding: 0; }
   #done { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; min-height: 100vh; padding: 0 16px; text-align: center; box-sizing: border-box; }
   #done[hidden] { display: none; }
   #done h1 { margin: 8px 0 0; font-size: 28px; font-weight: 600; letter-spacing: -0.01em; }
@@ -33,6 +38,16 @@
   <button id="reload" type="button">Reload page</button>
 </header>
 <canvas id="screen" tabindex="0" width="1280" height="900"></canvas>
+<dialog id="paste-dialog">
+  <form method="dialog">
+    <p>Paste here (Cmd/Ctrl+V), then Paste. It is typed into the field you clicked in the page.</p>
+    <input id="paste-input" type="password" autocomplete="off" spellcheck="false" aria-label="Text to paste">
+    <menu>
+      <button value="cancel" type="submit">Cancel</button>
+      <button value="ok" type="submit" id="paste-ok">Paste</button>
+    </menu>
+  </form>
+</dialog>
 </div>
 <script>
 const canvas = document.getElementById('screen');
@@ -98,16 +113,38 @@ canvas.addEventListener('keydown', (e) => {
   send({ kind: 'key', method: 'Input.dispatchKeyEvent', params: Object.assign({ type: 'keyUp' }, base) });
   e.preventDefault();
 });
-document.addEventListener('paste', (e) => { send({ kind: 'text', text: e.clipboardData.getData('text') }); e.preventDefault(); });
+const pasteDialog = document.getElementById('paste-dialog');
+const pasteInput = document.getElementById('paste-input');
+document.addEventListener('paste', (e) => {
+  if (pasteDialog.open) return; // the dialog's own field takes the paste
+  send({ kind: 'text', text: e.clipboardData.getData('text') });
+  e.preventDefault();
+});
 // The Clipboard API needs a secure context (https or localhost); a tailnet
-// http link is neither, so fall back to a prompt the owner pastes into.
+// http link is neither, so fall back to a dialog the owner pastes into. Its
+// field is type=password: what goes through it is usually one.
 document.getElementById('paste').onclick = async () => {
-  let text = null;
-  try { if (navigator.clipboard && window.isSecureContext) text = await navigator.clipboard.readText(); } catch (_) {}
-  if (text === null) text = window.prompt('Paste here (Cmd/Ctrl+V), then OK. It is typed into the focused field.');
-  if (text) send({ kind: 'text', text });
-  canvas.focus({ preventScroll: true });
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      const text = await navigator.clipboard.readText();
+      if (text) send({ kind: 'text', text });
+      canvas.focus({ preventScroll: true });
+      return;
+    }
+  } catch (_) {}
+  pasteInput.value = '';
+  pasteDialog.showModal();
+  pasteInput.focus();
 };
+// Enter means Paste: the form's first submit button is Cancel.
+pasteInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); pasteDialog.close('ok'); }
+});
+pasteDialog.addEventListener('close', () => {
+  if (pasteDialog.returnValue === 'ok' && pasteInput.value) send({ kind: 'text', text: pasteInput.value });
+  pasteInput.value = '';
+  canvas.focus({ preventScroll: true });
+});
 document.getElementById('reload').onclick = () => { send({ kind: 'reload' }); canvas.focus({ preventScroll: true }); };
 </script>
 </body>

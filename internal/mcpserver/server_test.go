@@ -16,7 +16,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
-// goldenToolNames is the 31-tool contract, frozen: change only alongside
+// goldenToolNames is the 32-tool contract, frozen: change only alongside
 // the spec, never by invention here.
 var goldenToolNames = []string{
 	"list_calendars", "list_events", "create_event", "update_event", "delete_event",
@@ -25,7 +25,7 @@ var goldenToolNames = []string{
 	"notes_folders", "notes_list", "notes_read", "notes_search", "update_note", "create_note",
 	"reminder_lists", "list_reminders", "completed_reminders", "complete_reminder", "create_reminder",
 	"drive_status",
-	"reask_access", "open_login",
+	"reask_access", "open_login", "sign_out",
 	"health_status", "health_days", "health_sleep", "health_effort", "health_recovery", "health_sql",
 }
 

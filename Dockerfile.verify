@@ -27,7 +27,7 @@ RUN printf '#!/bin/sh\nset -a\n. /work/.env\nset +a\nexec icloud-mcp "$@"\n' > /
 USER node
 WORKDIR /work
 RUN mkdir -p /home/node/.pi/agent \
-    && printf '{"mcpServers":{"icloud":{"command":"icloud-mcp-env","requestTimeoutMs":330000,"directTools":true}}}\n' > /work/.mcp.json
+    && printf '{"mcpServers":{"icloud":{"command":"icloud-mcp-env","lifecycle":"eager","requestTimeoutMs":330000,"directTools":true}}}\n' > /work/.mcp.json
 # Bind the login door on the container's interface; verify.sh publishes
 # it on the host's loopback only.
 ENV ICLOUD_DOOR_BIND=0.0.0.0

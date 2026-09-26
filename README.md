@@ -6,7 +6,7 @@
 
 Apple gives Notes and Reminders no API at all, and the parts that do have one are scattered across CalDAV, CardDAV and IMAP. So most iCloud automation quietly assumes a Mac on your desk running AppleScript. This server removes the Mac: calendar, contacts and mail go over the open protocols, and Notes and Reminders are driven through the real iCloud web apps in a headless Chrome that stays signed in. It runs on your laptop, a small VPS or a Raspberry Pi, and any MCP client that can spawn a process can use it.
 
-- **31 tools, one server entry.** Read and write your calendar, search contacts, read and send mail, read and create notes, list and complete reminders, and check the iCloud Drive pull. [Full list below](#tools).
+- **32 tools, one server entry.** Read and write your calendar, search contacts, read and send mail, read and create notes, list and complete reminders, and check the iCloud Drive pull. [Full list below](#tools).
 - **Two variables to configure.** Your Apple ID and an app-specific password. Everything else has a default.
 - **Sign-in from your agent.** When the session needs a login, the agent hands you a one-time link to the headless browser. You sign in from any browser, the page tells you when you are done, and the agent carries on.
 - **Safe writes.** Deletes, sent mail, note rewrites and anything that reaches other people ask you first, through the MCP client itself. Every Notes and Reminders write is checked against what the app shows, not assumed from a response code.
@@ -125,7 +125,7 @@ The link is a Tailscale address when the machine is on a tailnet, so you can sig
 | Notes     | `notes_folders`, `notes_list`, `notes_read`, `notes_search` | `create_note`; `update_note` (asks)                                              |
 | Reminders | `reminder_lists`, `list_reminders`, `completed_reminders`   | `create_reminder`, `complete_reminder`                                           |
 | Drive     | `drive_status`                                              |                                                                                  |
-| Recovery  |                                                             | `open_login` (asks): the login door; `reask_access` (asks): re-sends Apple's data-access prompt |
+| Recovery  |                                                             | `open_login` (asks): the login door; `reask_access` (asks): re-sends Apple's data-access prompt; `sign_out` (asks): signs the server out of iCloud |
 | Health    | `health_status`, `health_days`, `health_sleep`, `health_effort`, `health_recovery`, `health_sql` | optional extension, see [below](#health-extension-optional) |
 
 Mail reads never mark a message as seen. No tool deletes or moves mail, deletes a note, or triggers the Drive pull.
@@ -136,14 +136,14 @@ A running install holds a signed-in Apple session, so the design keeps that sess
 
 - **Nothing is exposed.** The server talks stdio to the agent that spawned it. There is no network listener, except the login door while it is open.
 - **The login door is narrow.** It opens only for a signed-out session and only after you approve it in the agent. Each opening issues a new 16-character random password (username `root`) and kills any earlier door. It binds only the tailnet or loopback address, closes after 20 minutes at the latest, and closes within seconds of your sign-in, taking its password with it. The viewer can send mouse, keyboard and paste input to the page (and reload it), never script.
-- **You approve what matters.** Deletes, sent mail, note rewrites, event changes that reach other attendees, and both recovery tools ask through MCP elicitation, and run only on an explicit yes. A session that cannot ask, such as a scheduled run, gets a refusal and no write. The tiering is in this server, not in the client's configuration.
+- **You approve what matters.** Deletes, sent mail, note rewrites, event changes that reach other attendees, the two recovery tools and `sign_out` ask through MCP elicitation, and run only on an explicit yes. A session that cannot ask, such as a scheduled run, gets a refusal and no write. The tiering is in this server, not in the client's configuration.
 - **Revocable credentials.** The only secret is an app-specific password, revocable at account.apple.com without touching the rest of the account.
 - **Quiet hours.** A fresh app-page load is refused from 23:00 through 06:59 in your zone, so no approval prompt wakes you at night.
 - **Separation on a server.** The server install runs as its own service account behind one exact sudoers rule, so the agent's own uid cannot read the password.
 
 ## How it works
 
-One process serves all 31 tools. Calendar and contacts go over CalDAV and CardDAV, mail over IMAP, all with the app-specific password. Notes and Reminders drive the iCloud web apps through the resident headless Chrome over the DevTools protocol, each app behind its own lock, so a slow Notes call never holds up a mail read. The resident holds the session in its profile; restarting it keeps you signed in. Details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+One process serves all 32 tools. Calendar and contacts go over CalDAV and CardDAV, mail over IMAP, all with the app-specific password. Notes and Reminders drive the iCloud web apps through the resident headless Chrome over the DevTools protocol, each app behind its own lock, so a slow Notes call never holds up a mail read. The resident holds the session in its profile; restarting it keeps you signed in. Details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 Things worth knowing:
 
@@ -203,6 +203,7 @@ What has actually been run against Apple, so nobody has to guess.
 - **Calendar and mail: reads and writes verified.** `list_calendars`, `list_events`, `create_event`, `update_event`, `delete_event` (each confirmed by a fresh listing), `list_mail`, `search_mail`, and `send_mail` to the account itself. An earlier build returned no events from iCloud at all; that is fixed.
 - **Notes: reads, `create_note` and `update_note` verified.** Every note is opened by its exact title and checked against what the app shows before anything is written; when that check fails (it did once, on a note created seconds earlier) the tool refuses and a retry succeeds, so no note is ever half-replaced.
 - **Reminders: reads, `create_reminder` with a due time, `complete_reminder` and `completed_reminders` verified.** Each write is read back from the list, and a failed create says so without leaving blank reminders behind.
+- **`sign_out` verified live in the Linux rig (2026-09-26).** Apple's own Sign Out took on the first click (no confirmation dialog), the browser's cookies and saved jar were cleared, `session-check` then read signed out, and the page showed Sign In.
 - **The web apps are a moving target.** An Apple redesign can break Notes or Reminders without notice. The tools fail loudly rather than return the wrong thing.
 - **Nothing in the test suite talks to Apple.** `go test ./...` is deterministic and offline; `./verify.sh` is the live Linux rig.
 

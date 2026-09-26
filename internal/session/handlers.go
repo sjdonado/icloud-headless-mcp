@@ -1,7 +1,8 @@
 // Tool wiring for recovery: reask_access re-fires Apple's data-access
-// prompt, open_login opens the supervised login door. Both are
-// confirmed: they act on the owner's devices or open the login screen,
-// so a session that cannot ask gets a refusal and nothing happens.
+// prompt, open_login opens the supervised login door, sign_out ends the
+// session. All three are confirmed: they act on the owner's devices, open
+// the login screen or end the session, so a session that cannot ask gets
+// a refusal and nothing happens.
 package session
 
 import (
@@ -17,7 +18,7 @@ import (
 	"github.com/sjdonado/icloud-headless-mcp/internal/mcpserver"
 )
 
-// Handlers wires the two recovery tools.
+// Handlers wires the recovery tools.
 func Handlers(cfg *config.Config, ask func(ctx context.Context, question string) string) map[string]server.ToolHandlerFunc {
 	state := browser.State{Dir: cfg.StateDir, Shared: cfg.SharedState, CDP: cfg.CDP}
 	return map[string]server.ToolHandlerFunc{
@@ -26,6 +27,9 @@ func Handlers(cfg *config.Config, ask func(ctx context.Context, question string)
 		},
 		"open_login": func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			return openLogin(ctx, cfg, state, ask)
+		},
+		"sign_out": func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return signOut(ctx, state, ask)
 		},
 	}
 }
@@ -147,4 +151,60 @@ func openLogin(ctx context.Context, cfg *config.Config, state browser.State, ask
 			"is swept on the next recovery-tool call, or earlier once the login is observed.",
 		"reaped": reaped,
 	})
+}
+
+// signOut ends the iCloud session in the resident browser, after the
+// owner approves: Apple's own Sign Out, then the profile's cookies and
+// site data, so nothing is left to resume. Signing back in is open_login.
+func signOut(ctx context.Context, state browser.State, ask func(ctx context.Context, question string) string) (*mcp.CallToolResult, error) {
+	reaped := ReapDoors(state)
+	outcome, _ := browser.NewCDP(state.CDP).Check()
+	if outcome == browser.Unreachable {
+		return mcpserver.ResultJSON(map[string]any{"signed_out": false,
+			"error": "no browser answers, so there is no session to sign out of"})
+	}
+	signedIn := outcome != browser.SignedOut
+	if signedIn {
+		if ask == nil {
+			return mcpserver.ResultJSON(map[string]any{"signed_out": false,
+				"error": "nobody was present to approve it, so nothing was done"})
+		}
+		if refused := ask(ctx, "Sign this server out of iCloud? Notes and Reminders stop working "+
+			"until you sign in again through the login door, which needs your Apple ID password "+
+			"and a two-factor code. Calendar, contacts and mail keep working: they use the "+
+			"app-specific password, which you revoke at account.apple.com."); refused != "" {
+			return mcpserver.ResultJSON(map[string]any{"signed_out": false, "error": refused})
+		}
+	}
+	// Every browser user waits: a Notes or Reminders write must not lose
+	// its cookies halfway, no door may open onto a half-wiped profile, and
+	// the resident must not save a jar read before the wipe. One deadline
+	// for all four, so the call stays inside the client's timeout.
+	deadline := time.Now().Add(150 * time.Second)
+	for _, lock := range []string{"notes", "Reminders", "login-door", browser.JarLock} {
+		unlock, err := browser.AppLock(state.Dir, lock, time.Until(deadline))
+		if err != nil {
+			return mcpserver.ResultJSON(map[string]any{"signed_out": false,
+				"error": "a " + lock + " operation is still running; nothing was signed out, try again when it finishes"})
+		}
+		defer unlock()
+	}
+	// A door opened between the question and the locks would stay open
+	// onto the wiped profile: close it now.
+	if d := liveDoor(state); d != nil {
+		closeDoor(d)
+		removeRecordFor(state, d.Pid)
+	}
+	// Already signed out still gets the local wipe (no Apple menu, nothing
+	// to approve): leftover cookies, site data and a stale jar go too.
+	res, err := browser.SignOut(state, signedIn)
+	out := map[string]any{"signed_out": err == nil, "already": !signedIn, "steps": res, "reaped": reaped,
+		"next": "open_login signs back in"}
+	if err != nil {
+		out["error"] = err.Error()
+	}
+	if signedIn && !res.AppleSignOut {
+		out["note"] = "Apple's own Sign Out did not complete, so the session was ended by wiping this browser's cookies and site data. Remove the browser from your account's devices at account.apple.com if you want Apple to forget it."
+	}
+	return mcpserver.ResultJSON(out)
 }
