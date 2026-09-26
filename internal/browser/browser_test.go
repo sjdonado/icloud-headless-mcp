@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -99,6 +100,13 @@ func (f *fakeCDP) serveWS(ws *nws.Conn) {
 			}
 			f.mu.Unlock()
 			f.reply(ws, id, map[string]any{"cookies": cookies})
+		case "Storage.clearCookies":
+			f.cookies = nil
+			f.mu.Unlock()
+			f.reply(ws, id, map[string]any{})
+		case "Storage.clearDataForOrigin", "Input.dispatchMouseEvent":
+			f.mu.Unlock()
+			f.reply(ws, id, map[string]any{})
 		case "Target.attachToTarget":
 			if p, ok := params["targetId"].(string); ok {
 				attached = p
@@ -463,4 +471,40 @@ func TestEvalMainFindsDefaultContext(t *testing.T) {
 		t.Fatalf("got %s, %v", raw, err)
 	}
 	_ = state
+}
+
+// TestSignOutWipesTheLocalSession covers the local half of sign_out: the
+// jar and the latch go first, then every cookie and the site data, and
+// the Notes and Reminders tabs close. (Apple's own menu is driven only
+// with menu=true, against the real page.)
+func TestSignOutWipesTheLocalSession(t *testing.T) {
+	fake, srv, _ := newFakeCDP(t)
+	fake.targets = appTargets()
+	fake.cookies = []map[string]any{{"name": "X-APPLE-WEBAUTH-TOKEN"}}
+	state := testState(t)
+	state.CDP = srv.URL
+	jar := filepath.Join(state.Dir, "cookies.json")
+	if err := os.WriteFile(jar, []byte("[]"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state.LatchBlocked("test")
+	res, err := SignOut(state, false)
+	if err != nil {
+		t.Fatalf("SignOut: %v", err)
+	}
+	if !res.CookiesCleared || !res.JarRemoved || res.AppleSignOut {
+		t.Fatalf("result %+v", res)
+	}
+	if _, err := os.Stat(jar); !os.IsNotExist(err) {
+		t.Fatal("the cookie jar survived the sign-out")
+	}
+	if state.Blocked() {
+		t.Fatal("the latch survived the sign-out; the next failure would route to reask_access")
+	}
+	if fake.hits["Storage.clearCookies"] != 1 || fake.hits["Storage.clearDataForOrigin"] != len(signedOutOrigins) {
+		t.Fatalf("wipe calls: %v", fake.hits)
+	}
+	if res.TabsClosed != 2 {
+		t.Fatalf("closed %d app tabs (%v), want the Notes and Reminders tabs", res.TabsClosed, fake.closed)
+	}
 }

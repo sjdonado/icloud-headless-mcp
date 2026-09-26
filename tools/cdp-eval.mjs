@@ -39,7 +39,8 @@ if (rest[0] === '--key') { const k = rest[1]; const codes = { Tab: 9, Enter: 13,
 await call('Runtime.enable'); await sleep(300);
 const tree = (await call('Page.getFrameTree')).result.frameTree;
 const app = (tree.childFrames || []).find(f => f.frame.url.includes('applications'))?.frame.id;
-const ctx = ctxs.find(c => c.auxData?.isDefault && c.auxData.frameId === app);
+// The app's iframe when there is one (Notes, Reminders), else the top frame (the home page).
+const ctx = ctxs.find(c => c.auxData?.isDefault && c.auxData.frameId === (app || tree.frame.id));
 const helpers = `const $$all = (sel, root = document) => { const out = []; const walk = (r) => { out.push(...r.querySelectorAll(sel)); for (const el of r.querySelectorAll('*')) if (el.shadowRoot) walk(el.shadowRoot); }; walk(root); return out; };
 const box = (el) => { const b = el.getBoundingClientRect(); return {x: Math.round(b.x + b.width/2), y: Math.round(b.y + b.height/2), w: Math.round(b.width), h: Math.round(b.height)}; };
 const desc = (el) => ({tag: el.tagName.toLowerCase(), cls: (el.className||'').toString().slice(0, 70), text: (el.innerText||'').trim().slice(0, 50), aria: el.getAttribute('aria-label'), role: el.getAttribute('role'), ...box(el)});`;

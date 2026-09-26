@@ -108,6 +108,27 @@ func SaveJar(state State, cookies []map[string]any) int {
 	return len(cookies)
 }
 
+// JarLock serialises reading the browser's cookies with writing the jar,
+// and with sign_out's wipe: a read taken before the wipe must never be
+// written back after it.
+const JarLock = "jar"
+
+// SaveJarFrom reads the browser's cookies and saves the jar under the jar
+// lock, skipping the save when sign_out holds it. It returns what SaveJar
+// returns: 0 when nothing was saved.
+func SaveJarFrom(state State, cdp *CDP) int {
+	unlock, err := AppLock(state.Dir, JarLock, 5*time.Second)
+	if err != nil {
+		return 0
+	}
+	defer unlock()
+	cookies, err := cdp.AllCookies()
+	if err != nil {
+		return 0
+	}
+	return SaveJar(state, cookies)
+}
+
 // LoadJar reads the persisted jar, or nil when there is none.
 func LoadJar(state State) []map[string]any {
 	raw, err := os.ReadFile(filepath.Join(state.Dir, "cookies.json"))

@@ -60,10 +60,8 @@ func runLogin() int {
 			continue
 		}
 		time.Sleep(15 * time.Second) // let Apple finish writing cookies
-		if cookies, err := cdp.AllCookies(); err == nil {
-			if n := browser.SaveJar(state, cookies); n > 0 {
-				fmt.Printf("saved %d cookies to the jar\n", n)
-			}
+		if n := browser.SaveJarFrom(state, cdp); n > 0 {
+			fmt.Printf("saved %d cookies to the jar\n", n)
 		}
 		if outcome == browser.NeedsApproval {
 			fmt.Println("SIGNED IN, waiting for the data-access approval on a device")

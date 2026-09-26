@@ -34,7 +34,7 @@ type ToolDef struct {
 	Asks        string
 }
 
-// Tools is the full 31-tool registry in README table order. Names are the
+// Tools is the full 32-tool registry in README table order. Names are the
 // frozen contract (README Tools table, openspec/changes/go-rewrite/specs/),
 // not invented here.
 var Tools = []ToolDef{
@@ -63,6 +63,7 @@ var Tools = []ToolDef{
 	{"drive_status", "When the Drive pull last ran and what it holds. Status only.", TierReadOnly, "no"},
 	{"reask_access", "Re-fire Apple's data-access prompt. Asks the owner first.", TierConfirmed, "yes"},
 	{"open_login", "Open the login door: a one-time link where the owner signs in to iCloud from any browser. Use when a call reports needs_login. Asks the owner first.", TierConfirmed, "yes"},
+	{"sign_out", "Sign the server out of iCloud: Apple's own Sign Out, then this browser's cookies and site data. Notes and Reminders need open_login and a two-factor code afterwards; calendar, contacts and mail keep working. Asks the owner first.", TierConfirmed, "yes"},
 	{"health_status", "Health store coverage and freshness, blind spots named.", TierReadOnly, "no"},
 	{"health_days", "Per-day steps, energy, resting heart rate, HRV.", TierReadOnly, "no"},
 	{"health_sleep", "Sleep by night, stage labels kept.", TierReadOnly, "no"},

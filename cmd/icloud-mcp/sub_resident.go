@@ -156,9 +156,7 @@ func runResident() int {
 		select {
 		case <-ctx.Done():
 			// Shutting down, saving jar.
-			if cookies, err := cdp.AllCookies(); err == nil {
-				browser.SaveJar(state, cookies)
-			}
+			browser.SaveJarFrom(state, cdp)
 			_ = cmd.Process.Signal(syscall.SIGTERM)
 			_ = cmd.Wait()
 			return 0
@@ -182,10 +180,8 @@ func runResident() int {
 			}
 			deadChecks = 0
 			if time.Since(lastJar) > 5*time.Minute {
-				if cookies, err := cdp.AllCookies(); err == nil {
-					if n := browser.SaveJar(state, cookies); n > 0 {
-						fmt.Printf("jar: %d cookies\n", n)
-					}
+				if n := browser.SaveJarFrom(state, cdp); n > 0 {
+					fmt.Printf("jar: %d cookies\n", n)
 				}
 				lastJar = time.Now()
 			}

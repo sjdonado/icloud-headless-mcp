@@ -18,7 +18,7 @@ Notes and Reminders each hold their own per-app lock, because there is one brows
 | `internal/notes` | Notes, through the browser |
 | `internal/reminders` | Reminders, through the browser and through CloudKit for completions |
 | `internal/drive` | `drive_status`, and nothing that touches the pull |
-| `internal/session` | recovery: `reask_access`, `open_login`, and the login door (`doorserve.go` is the door process, `door.html` its page) |
+| `internal/session` | recovery: `reask_access`, `open_login`, `sign_out`, and the login door (`doorserve.go` is the door process, `door.html` its page) |
 | `internal/browser` | the CDP attach, the per-app locks, the blocked latch, quiet hours, the timezone override, and the tab reaper. Shared between the server handlers and the subcommands, and by nothing outside this directory |
 | `internal/drivefetch`, `internal/dvlibraries` | the Drive fetch mechanics and which libraries this install pulls |
 | `internal/queue`, `internal/drain` | the pending-write queue and the drain pass over it |
@@ -44,7 +44,7 @@ What a restart can cost is Apple's data-access grant, which is bound to the brow
 
 A fresh app-page load is refused between 23:00 and 07:00 local. An already-loaded tab is untouched, so reading notes and reminders through the night still works; only a load that would raise a prompt is deferred, with a message saying so.
 
-One latch decides whether the owner has already been asked, at `$ICLOUD_SHARED_STATE/blocked`. While it exists, the app helper refuses before touching the browser, nothing retries, and no watchdog restarts or re-requests, because retrying cannot produce a different answer until the owner approves. It is released by `agent-reask-access` or `reask_access`, which is the owner saying they are at a device, or by `icloud-mcp session-check` reporting healthy. A re-ask navigates one app rather than two, because Apple's grant covers iCloud.com data rather than a single application.
+One latch decides whether the owner has already been asked, at `$ICLOUD_SHARED_STATE/blocked`. While it exists, the app helper refuses before touching the browser, nothing retries, and no watchdog restarts or re-requests, because retrying cannot produce a different answer until the owner approves. It is released by `agent-reask-access` or `reask_access`, which is the owner saying they are at a device, or by `icloud-mcp session-check` reporting healthy, and by `sign_out`, because a signed-out session is waiting for a login, not an approval. A re-ask navigates one app rather than two, because Apple's grant covers iCloud.com data rather than a single application.
 
 `reask_access` runs the re-navigate plus latch-clear core that lives in `session.Reask` (the `reask` subcommand delegates to it), but only when the latch is set, outside quiet hours, and the owner approves the ask: the re-navigation itself does not check the clock, so the tool carries that gate or a night call would spend a prompt.
 
@@ -60,7 +60,7 @@ It is one process, `icloud-mcp door HOST:PORT TTL PASSFILE`, started by `open_lo
 - checks the session at start and every three seconds. On a sign-in (healthy, or signed in and waiting for the grant) it stops streaming, sends the viewers a done message that swaps the page for "Signed in to iCloud, continue in your agent" (or the approval variant), and exits ten seconds later. The stream stops before the signed-in iCloud home can show the owner's data.
 - exits by itself at its TTL (20 minutes) whether or not anything reaps it.
 
-`open_login` refuses before acting when its precondition fails: a latched grant routes to `reask_access`, a healthy session needs no door, and an unreachable browser has no screen to sign into. Every open replaces any door already open, so each call issues a fresh password and the previous one stops working at once. The door record (pid, expiry, password file, link) is swept by every recovery-tool entry: an expired or dead door is closed and its password file shredded. The door runs in its own process group with a recorded argv[0] (`icloud-login-door`), so closing it is identity-checked and never kills a recycled pid.
+`open_login` refuses before acting when its precondition fails: a latched grant routes to `reask_access`, a healthy session needs no door, and an unreachable browser has no screen to sign into. Every open replaces any door already open, so each call issues a fresh password and the previous one stops working at once. The door record (pid, expiry, password file, link) is swept by every recovery-tool entry: an expired or dead door is closed and its password file shredded. `sign_out` ends the session after the owner approves. It holds the Notes, Reminders and login-door locks so no write loses its cookies halfway. It clicks Apple's own Sign Out in the icloud.com account menu, counting that as done only once the session token is gone. Then it removes the saved cookie jar, clears the latch, clears every cookie and the iCloud and Apple site data, and closes the Notes and Reminders tabs. The result lists which of those steps completed. An already signed-out session gets the same local wipe without the menu or the ask. The door runs in its own process group with a recorded argv[0] (`icloud-login-door`), so closing it is identity-checked and never kills a recycled pid.
 
 ## The Drive pull
 
