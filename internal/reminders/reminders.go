@@ -205,10 +205,25 @@ func (c *Client) items(tab *browser.Tab) ([]map[string]any, error) {
 // ckKeys are the record fields the sync pulls. The date filter happens
 // here, over the cache: the Reminder type is not marked indexable, so no
 // server-side query can filter it.
-var ckKeys = []string{"Completed", "CompletionDate", "DueDate", "AllDay", "CreationDate", "List", "TitleDocument", "Deleted", "Flagged", "Priority", "Name"}
+// Alarms live in their own records: Alarm points at its Reminder, and
+// AlarmTrigger at its Alarm, carrying the time as base64 JSON date
+// components (probed 2026-09-26). Recurrence rules, hashtags and subtasks
+// had no records to probe, so only their presence is read.
+var ckKeys = []string{"Completed", "CompletionDate", "DueDate", "AllDay", "CreationDate", "List", "TitleDocument", "Deleted", "Flagged", "Priority", "Name",
+	"LastModifiedDate", "NotesDocument", "HashtagIDs", "RecurrenceRuleIDs", "Reminder", "Alarm", "Type", "DateComponentsData"}
+
+// ckCacheVersion changes whenever ckKeys does: a cache written with fewer
+// keys would keep serving records without the new fields, since an
+// incremental pass only returns what changed. It is in the file name, not
+// the file, so an older binary on the same state (a rollback) never
+// rewrites a cache this one trusts.
+const ckCacheVersion = 2
+
+// ckTypes are the record types the cache keeps.
+var ckTypes = map[string]bool{"Reminder": true, "List": true, "Alarm": true, "AlarmTrigger": true}
 
 func (c *Client) ckCachePath() string {
-	return filepath.Join(c.state.StateDir(), "reminders-ck.json")
+	return filepath.Join(c.state.StateDir(), fmt.Sprintf("reminders-ck-v%d.json", ckCacheVersion))
 }
 
 // ckSync brings the local record cache up to date. The first pass walks
@@ -241,7 +256,7 @@ func (c *Client) ckSyncEval(eval func(string, any) (json.RawMessage, error)) (ma
 	if err := json.Unmarshal(zonesRaw, &zones); err != nil {
 		return nil, err
 	}
-	var report []map[string]any
+	report := []map[string]any{}
 	for _, zone := range zones {
 		scope, _ := zone["scope"].(string)
 		owner, _ := zone["owner"].(string)
@@ -302,7 +317,7 @@ func (c *Client) ckSyncEval(eval func(string, any) (json.RawMessage, error)) (ma
 				if !ok {
 					continue
 				}
-				if t, _ := rec["t"].(string); t != "Reminder" && t != "List" {
+				if t, _ := rec["t"].(string); !ckTypes[t] {
 					continue
 				}
 				if n, _ := rec["n"].(string); n != "" {
@@ -339,6 +354,8 @@ func (c *Client) ckSyncEval(eval func(string, any) (json.RawMessage, error)) (ma
 	if err := os.Rename(tmp, c.ckCachePath()); err != nil {
 		return nil, err
 	}
+	// The unversioned cache from before holds reminder titles too.
+	_ = os.Remove(filepath.Join(c.state.StateDir(), "reminders-ck.json"))
 	cache["sync"] = report
 	return cache, nil
 }
@@ -347,18 +364,182 @@ func round1(f float64) float64 {
 	return float64(int(f*10+0.5)) / 10
 }
 
-// localDay renders a CloudKit millisecond timestamp. An all-day due date
-// is stored as midnight UTC, which renders as a wrong early-morning time
-// east of it: show the day alone when Apple says the reminder has no time.
-func localDay(ms float64, owner *time.Location, allDay bool) any {
+// ckIndex is the record cache read for rows: list names by record name,
+// and alarms by reminder record name.
+type ckIndex struct {
+	lists  map[string]string
+	alarms map[string][]map[string]any
+}
+
+func (c *Client) indexRecords(records map[string]any) ckIndex {
+	idx := ckIndex{lists: map[string]string{}, alarms: map[string][]map[string]any{}}
+	alarmOwner := map[string]string{}
+	for n, item := range records {
+		r, ok := item.(map[string]any)
+		if !ok || r["del"] == true {
+			continue
+		}
+		switch r["t"] {
+		case "List":
+			if name, _ := r["name"].(string); name != "" {
+				idx.lists[n] = name
+			}
+		case "Alarm":
+			if rem, _ := r["rem"].(string); rem != "" {
+				alarmOwner[n] = rem
+			}
+		}
+	}
+	for _, item := range records {
+		r, ok := item.(map[string]any)
+		if !ok || r["t"] != "AlarmTrigger" || r["del"] == true {
+			continue
+		}
+		alarm, _ := r["alarm"].(string)
+		rem := alarmOwner[alarm]
+		if rem == "" {
+			continue
+		}
+		a := map[string]any{}
+		if typ, _ := r["ttype"].(string); typ != "" {
+			a["type"] = strings.ToLower(typ)
+		}
+		if dc, _ := r["dc"].(string); dc != "" {
+			if at, ok := c.alarmTime(dc); ok {
+				a["at"] = at
+			}
+		}
+		idx.alarms[rem] = append(idx.alarms[rem], a)
+	}
+	for _, alarms := range idx.alarms {
+		sort.Slice(alarms, func(i, j int) bool { return fmt.Sprint(alarms[i]["at"]) < fmt.Sprint(alarms[j]["at"]) })
+	}
+	return idx
+}
+
+// completeParams is what a queued complete_reminder replays: the id alone
+// when there is one, so the replay and its summary name the same reminder.
+func completeParams(id, title, listName string) map[string]any {
+	if id != "" {
+		return map[string]any{"id": id}
+	}
+	return map[string]any{"title": title, "list_name": listName}
+}
+
+// alarmTime decodes an AlarmTrigger's DateComponentsData: base64 JSON
+// {year, month, day, hour, minute, second, timeZone: {identifier}}.
+func (c *Client) alarmTime(dc string) (string, bool) {
+	raw, err := base64.StdEncoding.DecodeString(dc)
+	if err != nil {
+		return "", false
+	}
+	var parts struct {
+		Year, Month, Day, Hour, Minute, Second int
+		TimeZone                               struct {
+			Identifier string `json:"identifier"`
+		} `json:"timeZone"`
+	}
+	if json.Unmarshal(raw, &parts) != nil || parts.Year == 0 {
+		return "", false
+	}
+	loc := c.owner
+	if l, err := time.LoadLocation(parts.TimeZone.Identifier); err == nil && parts.TimeZone.Identifier != "" {
+		loc = l
+	}
+	t := time.Date(parts.Year, time.Month(parts.Month), parts.Day, parts.Hour, parts.Minute, parts.Second, 0, loc)
+	return config.ISOTime(t, c.owner), true
+}
+
+// ckStamp is a CloudKit millisecond timestamp as ISO 8601 in the owner's
+// zone, or nil.
+func (c *Client) ckStamp(v any) any {
+	ms, _ := v.(float64)
 	if ms == 0 {
 		return nil
 	}
-	stamp := time.UnixMilli(int64(ms)).In(owner)
-	if allDay {
-		return time.UnixMilli(int64(ms)).UTC().Format("2006-01-02")
+	return config.ISOTime(time.UnixMilli(int64(ms)), c.owner)
+}
+
+// reminderRow is one reminder record as every Reminders read returns it.
+// Fields the record does not hold are omitted, never guessed.
+func (c *Client) reminderRow(r map[string]any, idx ckIndex) map[string]any {
+	n, _ := r["n"].(string)
+	id := n
+	if i := strings.LastIndex(id, "/"); i >= 0 {
+		id = id[i+1:]
 	}
-	return stamp.Format("2006-01-02 15:04")
+	listID, _ := r["list"].(string)
+	title, _ := r["title"].(string)
+	row := map[string]any{
+		"id": id, "list": idx.lists[listID], "title": ckTitle(title),
+		"completed": r["c"] == true, "flagged": r["flag"] == true, "all_day": false,
+	}
+	if notes, _ := r["notes"].(string); notes != "" {
+		if text := ckTitle(notes); text != "" {
+			row["notes"] = text
+		}
+	}
+	if dd, _ := r["dd"].(float64); dd != 0 {
+		// An all-day due date is stored as midnight UTC: the day alone.
+		if allday, _ := r["allday"].(bool); allday {
+			row["all_day"] = true
+			row["due"] = config.ISODate(time.UnixMilli(int64(dd)).UTC())
+		} else {
+			row["due"] = c.ckStamp(dd)
+		}
+	}
+	if pri, _ := r["pri"].(float64); pri != 0 {
+		if p := map[int]string{1: "high", 5: "medium", 9: "low"}[int(pri)]; p != "" {
+			row["priority"] = p
+		}
+	}
+	for key, field := range map[string]string{"completed_at": "cd", "created": "cr", "modified": "md"} {
+		if v := c.ckStamp(r[field]); v != nil {
+			row[key] = v
+		}
+	}
+	if alarms := idx.alarms[n]; len(alarms) > 0 {
+		row["alarms"] = alarms
+	}
+	if k, _ := r["rrules"].(float64); k > 0 {
+		row["recurring"] = true
+	}
+	if k, _ := r["tags"].(float64); k > 0 {
+		row["tag_count"] = int(k)
+	}
+	return row
+}
+
+// matchLists picks the lists whose name contains wanted, every list when
+// wanted is empty.
+func matchLists(lists map[string]string, wanted string) map[string]string {
+	wanted = strings.ToLower(strings.TrimSpace(wanted))
+	chosen := map[string]string{}
+	// An exact name narrows to that list alone, so "Work" never also
+	// returns "Homework"; a substring matches only when no name is exact.
+	for n, name := range lists {
+		if wanted != "" && strings.EqualFold(strings.TrimSpace(name), wanted) {
+			chosen[n] = name
+		}
+	}
+	if len(chosen) > 0 {
+		return chosen
+	}
+	for n, name := range lists {
+		if wanted == "" || strings.Contains(strings.ToLower(name), wanted) {
+			chosen[n] = name
+		}
+	}
+	return chosen
+}
+
+func listNames(lists map[string]string) []string {
+	names := []string{}
+	for _, name := range lists {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func parseDay(text string, owner *time.Location, end bool) (time.Time, bool, error) {
@@ -402,30 +583,10 @@ func (c *Client) Completed(ctx context.Context, listName, since, until string, l
 		}
 		records, _ := cache["records"].(map[string]any)
 		syncReport, _ := cache["sync"].([]map[string]any)
-		lists := map[string]string{}
-		for n, item := range records {
-			r, ok := item.(map[string]any)
-			if !ok || r["t"] != "List" || r["del"] == true {
-				continue
-			}
-			if name, _ := r["name"].(string); name != "" {
-				lists[n] = name
-			}
-		}
-		wanted := strings.ToLower(strings.TrimSpace(listName))
-		chosen := map[string]string{}
-		for n, name := range lists {
-			if wanted == "" || strings.Contains(strings.ToLower(name), wanted) {
-				chosen[n] = name
-			}
-		}
+		idx := c.indexRecords(records)
+		chosen := matchLists(idx.lists, listName)
 		if len(chosen) == 0 {
-			names := []string{}
-			for _, name := range lists {
-				names = append(names, name)
-			}
-			sort.Strings(names)
-			return map[string]any{"error": fmt.Sprintf("no list matching %s; available: %v", listName, names),
+			return map[string]any{"error": fmt.Sprintf("no list matching %s; available: %v", listName, listNames(idx.lists)),
 				"sync": syncReport}, nil
 		}
 		var loMS, hiMS float64
@@ -473,31 +634,7 @@ func (c *Client) Completed(ctx context.Context, listName, since, until string, l
 			})
 			completed := []map[string]any{}
 			for _, r := range rows[:min(limit, len(rows))] {
-				id, _ := r["n"].(string)
-				if i := strings.LastIndex(id, "/"); i >= 0 {
-					id = id[i+1:]
-				}
-				dd, _ := r["dd"].(float64)
-				allday, _ := r["allday"].(bool)
-				pri, _ := r["pri"].(float64)
-				var priority any
-				switch int(pri) {
-				case 1:
-					priority = "high"
-				case 5:
-					priority = "medium"
-				case 9:
-					priority = "low"
-				}
-				title, _ := r["title"].(string)
-				cd, _ := r["cd"].(float64)
-				completed = append(completed, map[string]any{
-					"id": id, "title": ckTitle(title),
-					"completed_at": localDay(cd, c.owner, false),
-					"due":          localDay(dd, c.owner, allday),
-					"flagged":      r["flag"] == true,
-					"priority":     priority,
-				})
+				completed = append(completed, c.reminderRow(r, idx))
 			}
 			if completed == nil {
 				completed = []map[string]any{}
@@ -523,7 +660,7 @@ func (c *Client) Completed(ctx context.Context, listName, since, until string, l
 		return map[string]any{
 			"window":          map[string]any{"since": sinceOut, "until": untilOut, "timezone": c.owner.String()},
 			"total_in_window": total, "lists": out, "sync": syncReport,
-			"note": "completed_at is when the owner ticked it, in the owner's local time; due is what it was set for. Deleted reminders are excluded."}, nil
+			"note": "completed_at is when the owner ticked it; due is what it was set for. Both are ISO 8601 in the owner's zone; an all-day due is a date. Deleted reminders are excluded."}, nil
 	})
 }
 
@@ -532,7 +669,7 @@ func (c *Client) lists(tab *browser.Tab) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	var out []string
+	out := []string{}
 	for _, n := range names {
 		if n = strings.TrimSpace(n); n != "" {
 			out = append(out, n)
@@ -554,10 +691,16 @@ func (c *Client) openList(tab *browser.Tab, listName string) string {
 	}
 	wanted := strings.ToLower(strings.TrimSpace(listName))
 	match := -1
+	// An exact name wins over a substring, so "Work" never opens "Homework".
 	for i, n := range names {
-		if strings.Contains(strings.ToLower(n), wanted) {
+		if strings.EqualFold(strings.TrimSpace(n), wanted) {
 			match = i
 			break
+		}
+	}
+	for i, n := range names {
+		if match < 0 && strings.Contains(strings.ToLower(n), wanted) {
+			match = i
 		}
 	}
 	if match < 0 {
@@ -581,40 +724,131 @@ func (c *Client) Lists(ctx context.Context) (map[string]any, error) {
 	})
 }
 
-// ListReminders reads the open reminders in one list.
+// ListReminders reads the open reminders from Apple's records: every
+// list when listName is empty, else the lists whose name contains it. It
+// clicks nothing, so hidden and unrendered rows are included. When the
+// record store does not answer it falls back to the rendered list, which
+// needs a list name and carries fewer fields.
 func (c *Client) ListReminders(ctx context.Context, listName string) (map[string]any, error) {
 	return c.withApp(ctx, func(tab *browser.Tab) (map[string]any, error) {
-		if problem := c.openList(tab, listName); problem != "" {
-			return map[string]any{"error": problem}, nil
+		cache, err := c.ckSync(tab)
+		syncReport, _ := cache["sync"].([]map[string]any)
+		if err == nil && syncFailed(syncReport) {
+			err = fmt.Errorf("%v", syncReport)
 		}
-		all, err := c.items(tab)
 		if err != nil {
-			return nil, err
+			return c.listFromPage(tab, listName, shortError(err))
 		}
-		var items []map[string]any
-		for _, r := range all {
-			if completed, _ := r["completed"].(bool); !completed {
-				items = append(items, r)
-			}
-		}
-		if items == nil {
-			items = []map[string]any{}
-		}
-		dated, prioritised := 0, 0
-		for _, r := range items {
-			if r["due"] != nil {
-				dated++
-			}
-			if r["priority"] != nil {
-				prioritised++
-			}
-		}
-		return map[string]any{"list": listName, "count": len(items),
-			"with_due_date": dated, "with_priority": prioritised, "reminders": items,
-			"note": "due values are exactly what the app displays, so they are relative: " +
-				"'Today, 4:00 PM' means today in the owner's zone. priority is high, medium or " +
-				"low as set on the reminder; flagged is Apple's flag. Neither can be set from here yet."}, nil
+		records, _ := cache["records"].(map[string]any)
+		return c.openFromRecords(records, syncReport, listName), nil
 	})
+}
+
+// openFromRecords is list_reminders over the record cache: open,
+// undeleted reminders of the chosen lists, sorted.
+func (c *Client) openFromRecords(records map[string]any, syncReport []map[string]any, listName string) map[string]any {
+	idx := c.indexRecords(records)
+	chosen := matchLists(idx.lists, listName)
+	if len(chosen) == 0 {
+		return map[string]any{"error": fmt.Sprintf("no list matching %s; available: %v", listName, listNames(idx.lists))}
+	}
+	var recs []map[string]any
+	for _, item := range records {
+		r, ok := item.(map[string]any)
+		if !ok || r["t"] != "Reminder" || r["del"] == true || r["c"] == true {
+			continue
+		}
+		if listID, _ := r["list"].(string); chosen[listID] != "" {
+			recs = append(recs, r)
+		}
+	}
+	// By list, then due instant (undated last), then creation: stable
+	// across calls, which map iteration is not. Numbers, not the ISO
+	// text, so an all-day date and a DST hour sort by time.
+	num := func(r map[string]any, k string) float64 { v, _ := r[k].(float64); return v }
+	str := func(r map[string]any, k string) string { v, _ := r[k].(string); return v }
+	sort.Slice(recs, func(i, j int) bool {
+		a, b := recs[i], recs[j]
+		if la, lb := idx.lists[str(a, "list")], idx.lists[str(b, "list")]; la != lb {
+			return la < lb
+		}
+		if da, db := num(a, "dd"), num(b, "dd"); da != db {
+			if da == 0 || db == 0 {
+				return db == 0
+			}
+			return da < db
+		}
+		if ca, cb := num(a, "cr"), num(b, "cr"); ca != cb {
+			return ca < cb
+		}
+		return str(a, "n") < str(b, "n")
+	})
+	items := []map[string]any{}
+	for _, r := range recs {
+		items = append(items, c.reminderRow(r, idx))
+	}
+	dated, prioritised := 0, 0
+	for _, r := range items {
+		if r["due"] != nil {
+			dated++
+		}
+		if r["priority"] != nil {
+			prioritised++
+		}
+	}
+	chosenNames := []string{}
+	for _, name := range chosen {
+		chosenNames = append(chosenNames, name)
+	}
+	sort.Strings(chosenNames)
+	return map[string]any{"source": "records", "lists": chosenNames, "count": len(items),
+		"with_due_date": dated, "with_priority": prioritised, "reminders": items, "sync": syncReport,
+		"note": "due, created and modified are ISO 8601 in the owner's zone; an all-day due is a date. " +
+			"recurring means the reminder repeats; the rule itself is not read. " +
+			"id is what complete_reminder accepts."}
+}
+
+// syncFailed is a sync where every zone reported an error.
+func syncFailed(report []map[string]any) bool {
+	if len(report) == 0 {
+		return true
+	}
+	for _, z := range report {
+		if _, bad := z["error"]; !bad {
+			return false
+		}
+	}
+	return true
+}
+
+// listFromPage is the fallback read of the rendered list: one list, the
+// fields the page shows, and due as the app's relative text.
+func (c *Client) listFromPage(tab *browser.Tab, listName, why string) (map[string]any, error) {
+	if strings.TrimSpace(listName) == "" {
+		return map[string]any{"error": "Apple's reminder records did not answer (" + why + "), and reading the page " +
+			"needs one list at a time: pass list_name (see reminder_lists)."}, nil
+	}
+	if problem := c.openList(tab, listName); problem != "" {
+		return map[string]any{"error": problem}, nil
+	}
+	all, err := c.items(tab)
+	if err != nil {
+		return nil, err
+	}
+	items := []map[string]any{}
+	for _, r := range all {
+		if completed, _ := r["completed"].(bool); !completed {
+			r["list"] = listName
+			r["due_display"] = r["due"]
+			delete(r, "due")
+			items = append(items, r)
+		}
+	}
+	return map[string]any{"source": "page", "lists": []string{listName}, "count": len(items), "reminders": items,
+		"unavailable":   []string{"due as ISO", "notes", "created", "modified", "alarms", "recurring"},
+		"records_error": why,
+		"note": "read from the rendered list because Apple's records did not answer: due_display is the " +
+			"app's relative text, and rows the page has not rendered are missing."}, nil
 }
 
 // ckTitle decodes a CloudKit TitleDocument: a zlib or gzip stream holding
@@ -1214,12 +1448,50 @@ func parseDue(due string) (time.Time, *dueTime, map[string]any) {
 // Complete ticks a reminder off. The match must be unique; the result is
 // read back from the list rather than reported from a click. A repeating
 // reminder rolls to its next occurrence instead of disappearing.
-func (c *Client) Complete(ctx context.Context, title, listName string) (map[string]any, error) {
+func (c *Client) Complete(ctx context.Context, title, listName, id string) (map[string]any, error) {
 	return c.withApp(ctx, func(tab *browser.Tab) (map[string]any, error) {
+		var recordDue float64
+		if id != "" {
+			// By id, the record names the list and the title, and the row
+			// is matched by its DOM id: two reminders with one title can
+			// no longer be confused.
+			cache, err := c.ckSync(tab)
+			if err == nil {
+				if report, _ := cache["sync"].([]map[string]any); syncFailed(report) {
+					err = fmt.Errorf("no record zone answered: %v", report)
+				}
+			}
+			// A failed sync still returns the cache on disk; acting on
+			// it could call an un-ticked reminder done.
+			if err != nil {
+				return map[string]any{"completed": false, "id": id, "error": "could not read Apple's records to find that id: " + shortError(err)}, nil
+			}
+			records, _ := cache["records"].(map[string]any)
+			r, _ := records["Reminder/"+id].(map[string]any)
+			if r == nil || r["del"] == true {
+				return map[string]any{"completed": false, "id": id, "error": "no reminder with that id; list_reminders shows the current ids"}, nil
+			}
+			row := c.reminderRow(r, c.indexRecords(records))
+			if r["c"] == true {
+				return map[string]any{"completed": true, "id": id, "title": row["title"], "list": row["list"],
+					"note": "it was already completed; nothing was clicked"}, nil
+			}
+			title, _ = row["title"].(string)
+			listName, _ = row["list"].(string)
+			recordDue, _ = r["dd"].(float64)
+			if listName == "" {
+				return map[string]any{"completed": false, "id": id, "error": "that reminder's list is not in Apple's records"}, nil
+			}
+		}
 		if problem := c.openList(tab, listName); problem != "" {
 			return map[string]any{"error": problem}, nil
 		}
-		before, err := c.openItems(tab)
+		// Rows are tracked by id in id mode, by title otherwise.
+		read := c.openItems
+		if id != "" {
+			read = c.openByID
+		}
+		before, err := read(tab)
 		if err != nil {
 			return nil, err
 		}
@@ -1230,7 +1502,7 @@ func (c *Client) Complete(ctx context.Context, title, listName string) (map[stri
 			Error      string   `json:"error"`
 			Candidates []string `json:"candidates"`
 		}
-		if err := tab.EvalJSON(completeGeo, title, &spot); err != nil {
+		if err := tab.EvalJSON(completeGeo, []any{title, id}, &spot); err != nil {
 			return nil, err
 		}
 		if spot.Error != "" {
@@ -1241,8 +1513,10 @@ func (c *Client) Complete(ctx context.Context, title, listName string) (map[stri
 				out["open_reminders"] = []string{}
 			} else {
 				names := []string{}
-				for t := range before {
-					names = append(names, t)
+				for _, r := range before {
+					if t, _ := r["title"].(string); t != "" {
+						names = append(names, t)
+					}
 				}
 				sort.Strings(names)
 				if len(names) > 20 {
@@ -1252,7 +1526,14 @@ func (c *Client) Complete(ctx context.Context, title, listName string) (map[stri
 			}
 			return out, nil
 		}
-		target := spot.Title
+		target, shown := spot.Title, spot.Title
+		if id != "" {
+			target, shown = id, title
+			if _, ok := before[id]; !ok {
+				return map[string]any{"completed": false, "id": id, "list": listName,
+					"error": "the reminder's row was found but not in the open rows read before clicking; nothing was clicked"}, nil
+			}
+		}
 		wasDue := ""
 		if r, ok := before[target]; ok {
 			if d, _ := r["due"].(string); d != "" {
@@ -1265,7 +1546,7 @@ func (c *Client) Complete(ctx context.Context, title, listName string) (map[stri
 		var after map[string]map[string]any
 		for click := 0; click < 3; click++ {
 			if click > 0 {
-				if err := tab.EvalJSON(completeGeo, target, &spot); err != nil || spot.Error != "" {
+				if err := tab.EvalJSON(completeGeo, []any{spot.Title, id}, &spot); err != nil || spot.Error != "" {
 					break // the row is gone or ambiguous now: read the list below
 				}
 			}
@@ -1275,7 +1556,7 @@ func (c *Client) Complete(ctx context.Context, title, listName string) (map[stri
 			stillOpen := true
 			for check := 0; check < 2 && stillOpen; check++ {
 				sleep(3000)
-				if after, err = c.openItems(tab); err != nil {
+				if after, err = read(tab); err != nil {
 					return nil, err
 				}
 				_, stillOpen = after[target]
@@ -1287,25 +1568,84 @@ func (c *Client) Complete(ctx context.Context, title, listName string) (map[stri
 				break // a repeating reminder rolled forward: that is a completion
 			}
 		}
+		var idOut any
+		if id != "" {
+			idOut = id
+		}
 		var wasDueOut any
 		if wasDue != "" {
 			wasDueOut = wasDue
 		}
-		if _, still := after[target]; !still {
-			return map[string]any{"completed": true, "list": listName, "title": target,
+		_, still := after[target]
+		nowDue, _ := after[target]["due"].(string)
+		rolled := still && wasDue != "" && nowDue != "" && nowDue != wasDue
+		if id != "" && (!still || rolled) {
+			// A row can leave the page for other reasons (a re-render, a
+			// changed selection): by id, Apple's record has the last word.
+			if done, why := c.recordCompleted(tab, id, recordDue); !done {
+				return map[string]any{"completed": false, "list": listName, "title": shown, "id": idOut,
+					"error":   "the row left the list, but Apple's record does not show it completed: " + why,
+					"was_due": wasDueOut}, nil
+			}
+		}
+		if !still {
+			return map[string]any{"completed": true, "list": listName, "title": shown, "id": idOut,
 				"was_due": wasDueOut, "repeated": false,
 				"open_before": len(before), "open_after": len(after)}, nil
 		}
-		nowDue, _ := after[target]["due"].(string)
-		if wasDue != "" && nowDue != "" && nowDue != wasDue {
-			return map[string]any{"completed": true, "list": listName, "title": target,
+		if rolled {
+			return map[string]any{"completed": true, "list": listName, "title": shown, "id": idOut,
 				"was_due": wasDueOut, "repeated": true, "next_due": nowDue,
 				"note": "this reminder repeats, so it stays on the list with a new date"}, nil
 		}
-		return map[string]any{"completed": false, "list": listName, "title": target,
+		return map[string]any{"completed": false, "list": listName, "title": shown, "id": idOut,
 			"error":   "the reminder is still open after clicking its completion control",
 			"was_due": wasDueOut}, nil
 	})
+}
+
+// recordCompleted re-reads Apple's record for id after a click: done when
+// it is completed, or when a repeating reminder's due date moved on.
+func (c *Client) recordCompleted(tab *browser.Tab, id string, wasDue float64) (bool, string) {
+	// The server can lag the page by a moment.
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			sleep(2000)
+		}
+		cache, err := c.ckSync(tab)
+		if err != nil {
+			return false, shortError(err)
+		}
+		if report, _ := cache["sync"].([]map[string]any); syncFailed(report) {
+			return false, "no record zone answered"
+		}
+		records, _ := cache["records"].(map[string]any)
+		r, _ := records["Reminder/"+id].(map[string]any)
+		if r == nil {
+			return false, "the record is gone"
+		}
+		if dd, _ := r["dd"].(float64); r["c"] == true || (wasDue != 0 && dd != 0 && dd != wasDue) {
+			return true, ""
+		}
+	}
+	return false, "still open after three reads"
+}
+
+// openByID is the open rows keyed by record id.
+func (c *Client) openByID(tab *browser.Tab) (map[string]map[string]any, error) {
+	all, err := c.items(tab)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]map[string]any{}
+	for _, r := range all {
+		if completed, _ := r["completed"].(bool); !completed {
+			if id, _ := r["id"].(string); id != "" {
+				out[id] = r
+			}
+		}
+	}
+	return out, nil
 }
 
 func (c *Client) openItems(tab *browser.Tab) (map[string]map[string]any, error) {
@@ -1551,7 +1891,7 @@ func Handlers(cfg *config.Config, ask func(ctx context.Context, question string)
 		},
 		"list_reminders": func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			args := mcpserver.RequestArgs(req)
-			name, err := args.Str("list_name")
+			name, err := args.StrOr("list_name", "")
 			if err != nil {
 				return mcpserver.ErrorResult(err.Error())
 			}
@@ -1585,22 +1925,31 @@ func Handlers(cfg *config.Config, ask func(ctx context.Context, question string)
 		},
 		"complete_reminder": func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			args := mcpserver.RequestArgs(req)
-			title, err := args.Str("title")
+			opt, err := args.OptAll("id", "title", "list_name")
 			if err != nil {
 				return mcpserver.ErrorResult(err.Error())
 			}
-			name, err := args.Str("list_name")
-			if err != nil {
-				return mcpserver.ErrorResult(err.Error())
+			id, title, name := "", "", ""
+			if opt[0] != nil {
+				id = strings.TrimSpace(*opt[0])
+			}
+			if opt[1] != nil {
+				title = *opt[1]
+			}
+			if opt[2] != nil {
+				name = *opt[2]
+			}
+			if id == "" && (title == "" || name == "") {
+				return mcpserver.ErrorResult("pass id (from list_reminders), or both title and list_name")
 			}
 			return runClient(cfg, func(c *Client) (map[string]any, error) {
-				out, err := c.Complete(ctx, title, name)
+				out, err := c.Complete(ctx, title, name, id)
 				if err != nil {
 					return nil, err
 				}
 				if need, _ := out["needs_device_approval"].(bool); need {
 					if queued := c.queueIfLatched("complete_reminder",
-						map[string]any{"title": title, "list_name": name}); queued != nil {
+						completeParams(id, title, name)); queued != nil {
 						// queueIfLatched reports both flags; complete's
 						// shape carries completed:false.
 						queued["completed"] = false

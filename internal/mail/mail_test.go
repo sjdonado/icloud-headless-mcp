@@ -13,6 +13,7 @@ import (
 	smtpclient "github.com/emersion/go-smtp"
 
 	"github.com/sjdonado/icloud-headless-mcp/internal/config"
+	"github.com/sjdonado/icloud-headless-mcp/internal/mcpserver"
 )
 
 func testClient(t *testing.T, imapAddr string) *Client {
@@ -67,7 +68,7 @@ func TestListMailNewestFirst(t *testing.T) {
 	_ = fake
 	c := testClient(t, addr)
 	// The fake returns SEARCH uids ascending; the client must still list
-	// newest first with flags from the dedicated UID searches.
+	// newest first.
 	out, err := c.ListMail(context.Background(), "INBOX", 10, false, nil, nil)
 	if err != nil {
 		t.Fatalf("ListMail: %v", err)
@@ -85,13 +86,14 @@ func TestListMailNewestFirst(t *testing.T) {
 	for _, m := range msgs {
 		byUID[m["uid"].(string)] = m
 	}
-	if byUID["2"]["unread"] != true || byUID["4"]["unread"] != true {
+	flag := func(uid, name string) any { return byUID[uid]["flags"].(map[string]any)[name] }
+	if flag("2", "seen") != false || flag("4", "seen") != false {
 		t.Fatalf("unread flags wrong: %v", byUID)
 	}
-	if byUID["1"]["unread"] != false || byUID["3"]["unread"] != false {
+	if flag("1", "seen") != true || flag("3", "seen") != true {
 		t.Fatalf("seen flags wrong: %v", byUID)
 	}
-	if byUID["3"]["answered"] != true || byUID["1"]["answered"] != false {
+	if flag("3", "answered") != true || flag("1", "answered") != false {
 		t.Fatalf("answered flags wrong: %v", byUID)
 	}
 	if out["matched"] != 5 || out["count"] != 5 {
@@ -235,23 +237,23 @@ func TestSearchSortSliceAndCounters(t *testing.T) {
 func TestReadMailPlain(t *testing.T) {
 	_, addr := newFakeIMAP(t)
 	c := testClient(t, addr)
-	out, err := c.ReadMail(context.Background(), "1", "INBOX", false)
+	out, err := c.ReadMail(context.Background(), "1", "INBOX", false, 0)
 	if err != nil {
 		t.Fatalf("ReadMail: %v", err)
 	}
-	if out["from"] != "boss@example.com" || out["subject"] != "Q3 planning" {
+	if from, _ := out["from"].([]map[string]any); len(from) != 1 || from[0]["address"] != "boss@example.com" || out["subject"] != "Q3 planning" {
 		t.Fatalf("headers = %v", out)
 	}
 	if body, _ := out["body"].(string); !strings.Contains(body, "See you Thursday") {
 		t.Fatalf("body = %q", body)
 	}
-	if out["unread"] != false || out["answered"] != false {
+	if flags, _ := out["flags"].(map[string]any); flags["seen"] != true || flags["answered"] != false {
 		t.Fatalf("flags = %v", out)
 	}
-	if out["body_truncated"] != false || out["warning"] == "" {
+	if out["truncated"] != false || out["body_format"] != "text" || out["warning"] == "" {
 		t.Fatalf("result = %v", out)
 	}
-	if names, _ := out["attachments"].([]string); len(names) != 0 {
+	if names, _ := out["attachments"].([]map[string]any); len(names) != 0 {
 		t.Fatalf("attachments = %v", names)
 	}
 }
@@ -259,7 +261,7 @@ func TestReadMailPlain(t *testing.T) {
 func TestReadMailHtmlOnly(t *testing.T) {
 	_, addr := newFakeIMAP(t)
 	c := testClient(t, addr)
-	out, err := c.ReadMail(context.Background(), "3", "INBOX", false)
+	out, err := c.ReadMail(context.Background(), "3", "INBOX", false, 0)
 	if err != nil {
 		t.Fatalf("ReadMail: %v", err)
 	}
@@ -270,20 +272,20 @@ func TestReadMailHtmlOnly(t *testing.T) {
 	if strings.Contains(body, "<") || strings.Contains(body, "alert(1)") {
 		t.Fatalf("body leaks markup or script: %q", body)
 	}
-	if out["answered"] != true {
-		t.Fatalf("answered = %v", out["answered"])
+	if out["flags"].(map[string]any)["answered"] != true || out["body_format"] != "html-to-text" {
+		t.Fatalf("flags = %v, body_format = %v", out["flags"], out["body_format"])
 	}
 }
 
 func TestReadMailAttachmentsSave(t *testing.T) {
 	_, addr := newFakeIMAP(t)
 	c := testClient(t, addr)
-	out, err := c.ReadMail(context.Background(), "4", "INBOX", true)
+	out, err := c.ReadMail(context.Background(), "4", "INBOX", true, 0)
 	if err != nil {
 		t.Fatalf("ReadMail: %v", err)
 	}
-	names, _ := out["attachments"].([]string)
-	if len(names) != 2 {
+	names, _ := out["attachments"].([]map[string]any)
+	if len(names) != 2 || names[0]["name"] != "statement.pdf" || names[0]["mime_type"] != "application/pdf" {
 		t.Fatalf("attachments = %v", names)
 	}
 	saved, _ := out["attachments_saved"].([]map[string]any)
@@ -305,7 +307,7 @@ func TestReadMailAttachmentsSave(t *testing.T) {
 		t.Fatalf("reason = %q", reason)
 	}
 	// Without the flag, names are listed but nothing is written.
-	out, err = c.ReadMail(context.Background(), "4", "INBOX", false)
+	out, err = c.ReadMail(context.Background(), "4", "INBOX", false, 0)
 	if err != nil {
 		t.Fatalf("ReadMail: %v", err)
 	}
@@ -317,14 +319,14 @@ func TestReadMailAttachmentsSave(t *testing.T) {
 func TestReadMailNestedMultipart(t *testing.T) {
 	_, addr := newFakeIMAP(t)
 	c := testClient(t, addr)
-	out, err := c.ReadMail(context.Background(), "5", "INBOX", false)
+	out, err := c.ReadMail(context.Background(), "5", "INBOX", false, 0)
 	if err != nil {
 		t.Fatalf("ReadMail: %v", err)
 	}
 	if body, _ := out["body"].(string); !strings.Contains(body, "Inner body text.") {
 		t.Fatalf("nested body lost: %q", body)
 	}
-	if names, _ := out["attachments"].([]string); len(names) != 1 || names[0] != "n.txt" {
+	if names, _ := out["attachments"].([]map[string]any); len(names) != 1 || names[0]["name"] != "n.txt" {
 		t.Fatalf("nested attachments = %v", names)
 	}
 }
@@ -332,7 +334,7 @@ func TestReadMailNestedMultipart(t *testing.T) {
 func TestReadMailUnknownUID(t *testing.T) {
 	_, addr := newFakeIMAP(t)
 	c := testClient(t, addr)
-	out, err := c.ReadMail(context.Background(), "99", "INBOX", false)
+	out, err := c.ReadMail(context.Background(), "99", "INBOX", false, 0)
 	if err != nil {
 		t.Fatalf("ReadMail: %v", err)
 	}
@@ -491,8 +493,8 @@ func TestSendMailDeclinedSendsNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SendMail: %v", err)
 	}
-	if out["sent"] != false {
-		t.Fatalf("result = %v", out)
+	if out["sent"] != false || out["error"] == "" || out["error"] == nil {
+		t.Fatalf("result = %v; a refusal must carry error so it reads as isError", out)
 	}
 	sink.mu.Lock()
 	defer sink.mu.Unlock()
@@ -520,5 +522,237 @@ func TestSendMailLongBodyPreview(t *testing.T) {
 	}
 	if strings.Contains(question, long) {
 		t.Fatalf("full long body leaked into the question")
+	}
+}
+
+// richMsgs adds messages that exercise every listing field: full address
+// headers with an encoded name, a base64 plain part, a quoted-printable
+// part, and a body longer than one read_mail page.
+func richMsgs(fake *fakeIMAP) {
+	long := strings.Repeat("0123456789", 900) // 9000 characters
+	fake.boxes["INBOX"] = append(fake.boxes["INBOX"],
+		&fakeMsg{uid: 6, flagged: true, internalDate: d(2026, 10, 1), from: "Dana", subject: "Offsite",
+			raw: "From: =?UTF-8?Q?Dana_M=C3=BCller?= <dana@example.com>\r\n" +
+				"To: Owner <owner@example.com>, team@example.com\r\nCc: Eve <eve@example.com>\r\n" +
+				"Reply-To: planning@example.com\r\nSubject: Offsite\r\n" +
+				"Date: Thu, 01 Oct 2026 07:30:00 +0000\r\nMessage-ID: <offsite-1@example.com>\r\n" +
+				"In-Reply-To: <plan-0@example.com>\r\n" +
+				"Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n" +
+				"TGV0J3MgbWVldCBpbiB0aGUKICAgbW91bnRhaW5zLg==\r\n"},
+		&fakeMsg{uid: 7, internalDate: d(2026, 10, 2), from: "shop", subject: "Receipt",
+			raw: "From: shop@example.com\r\nSubject: Receipt\r\nDate: Fri, 02 Oct 2026 10:00:00 +0200\r\n" +
+				"Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n" +
+				"Total: 12=E2=82=AC, thank you=\r\n for shopping.\r\n"},
+		&fakeMsg{uid: 8, internalDate: d(2026, 10, 3), from: "log", subject: "Long log",
+			raw: "From: log@example.com\r\nSubject: Long log\r\nDate: Sat, 03 Oct 2026 10:00:00 +0200\r\n" +
+				"Content-Type: text/plain; charset=utf-8\r\n\r\n" + long})
+}
+
+func TestListMailRichFields(t *testing.T) {
+	fake, addr := newFakeIMAP(t)
+	richMsgs(fake)
+	c := testClient(t, addr)
+	c.owner, _ = time.LoadLocation("Europe/Amsterdam")
+	out, err := c.ListMail(context.Background(), "INBOX", 10, false, nil, nil)
+	if err != nil {
+		t.Fatalf("ListMail: %v", err)
+	}
+	if err := mcpserver.CheckOutput("list_mail", out); err != nil {
+		t.Fatal(err)
+	}
+	search, err := c.SearchMail(context.Background(), "Offsite", "INBOX", 10, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mcpserver.CheckOutput("search_mail", search); err != nil {
+		t.Fatal(err)
+	}
+	byUID := map[string]map[string]any{}
+	for _, m := range out["messages"].([]map[string]any) {
+		byUID[m["uid"].(string)] = m
+	}
+	m := byUID["6"]
+	from := m["from"].([]map[string]any)
+	to := m["to"].([]map[string]any)
+	if from[0]["name"] != "Dana Müller" || from[0]["address"] != "dana@example.com" || len(to) != 2 ||
+		to[1]["address"] != "team@example.com" || m["cc"].([]map[string]any)[0]["name"] != "Eve" ||
+		m["reply_to"].([]map[string]any)[0]["address"] != "planning@example.com" {
+		t.Errorf("addresses = from %v to %v cc %v reply_to %v", m["from"], m["to"], m["cc"], m["reply_to"])
+	}
+	for key, want := range map[string]any{
+		"message_id": "<offsite-1@example.com>", "in_reply_to": "<plan-0@example.com>",
+		"date": "2026-10-01T09:30:00+02:00", "date_raw": "Thu, 01 Oct 2026 07:30:00 +0000",
+		"internal_date": "2026-10-01T14:00:00+02:00", "mailbox": "INBOX",
+		"snippet": "Let's meet in the mountains.", "has_attachments": false,
+	} {
+		if m[key] != want {
+			t.Errorf("uid 6 %s = %#v, want %#v", key, m[key], want)
+		}
+	}
+	if f := m["flags"].(map[string]any); f["flagged"] != true || f["seen"] != false || f["draft"] != false {
+		t.Errorf("flags = %v", f)
+	}
+	if size, _ := m["size"].(int64); size <= 0 {
+		t.Errorf("size = %v", m["size"])
+	}
+	if got := byUID["7"]["snippet"]; got != "Total: 12€, thank you for shopping." {
+		t.Errorf("quoted-printable snippet = %q", got)
+	}
+	if got := byUID["3"]["snippet"]; got != "Boarding pass Gate 42" {
+		t.Errorf("HTML-only snippet = %q", got)
+	}
+	if got := byUID["5"]["snippet"]; got != "Inner body text." {
+		t.Errorf("nested snippet = %q", got)
+	}
+	if got, _ := byUID["8"]["snippet"].(string); len([]rune(got)) != snippetRunes {
+		t.Errorf("long snippet is %d runes, want the %d cap", len([]rune(got)), snippetRunes)
+	}
+	att := byUID["4"]["attachments"].([]map[string]any)
+	if byUID["4"]["has_attachments"] != true || len(att) != 2 || att[0]["name"] != "statement.pdf" ||
+		att[0]["mime_type"] != "application/pdf" || att[0]["size"].(int64) <= 0 {
+		t.Errorf("attachments = %v", att)
+	}
+	if byUID["4"]["snippet"] != "See attached." {
+		t.Errorf("mixed snippet = %q", byUID["4"]["snippet"])
+	}
+}
+
+func TestMailReadsNeverSetSeen(t *testing.T) {
+	fake, addr := newFakeIMAP(t)
+	richMsgs(fake)
+	c := testClient(t, addr)
+	ctx := context.Background()
+	if _, err := c.ListMail(ctx, "INBOX", 10, false, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.SearchMail(ctx, "Offsite", "INBOX", 10, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, uid := range []string{"2", "4", "6", "8"} {
+		if _, err := c.ReadMail(ctx, uid, "INBOX", false, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, m := range fake.boxes["INBOX"] {
+		if (m.uid == 2 || m.uid == 4 || m.uid >= 5) && m.seen {
+			t.Errorf("uid %d gained \\Seen from a read", m.uid)
+		}
+	}
+	for _, f := range fake.fetches {
+		if strings.Contains(strings.ToUpper(f), "BODY[") {
+			t.Errorf("a fetch without PEEK: %s", f)
+		}
+	}
+}
+
+func TestReadMailPages(t *testing.T) {
+	fake, addr := newFakeIMAP(t)
+	richMsgs(fake)
+	c := testClient(t, addr)
+	first, err := c.ReadMail(context.Background(), "8", "INBOX", false, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mcpserver.CheckOutput("read_mail", first); err != nil {
+		t.Fatal(err)
+	}
+	if first["truncated"] != true || first["total_length"] != 9000 || first["next_offset"] != bodyPage ||
+		len([]rune(first["body"].(string))) != bodyPage {
+		t.Fatalf("first page = truncated %v total %v next %v", first["truncated"], first["total_length"], first["next_offset"])
+	}
+	rest, err := c.ReadMail(context.Background(), "8", "INBOX", false, bodyPage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rest["truncated"] != false || rest["next_offset"] != nil || first["body"].(string)+rest["body"].(string) != strings.Repeat("0123456789", 900) {
+		t.Fatalf("second page = truncated %v next %v, %d chars", rest["truncated"], rest["next_offset"], len(rest["body"].(string)))
+	}
+	if msg, _ := mustRead(t, c, "8", -1)["error"].(string); msg == "" {
+		t.Fatal("negative offset accepted")
+	}
+}
+
+func mustRead(t *testing.T, c *Client, uid string, offset int) map[string]any {
+	t.Helper()
+	out, err := c.ReadMail(context.Background(), uid, "INBOX", false, offset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func TestSearchBatchesLocalPass(t *testing.T) {
+	fake, addr := newFakeIMAP(t)
+	richMsgs(fake)
+	c := testClient(t, addr)
+	// No server-side key matches the decoded word, so every message goes
+	// through the local pass.
+	if _, err := c.SearchMail(context.Background(), "wrzesień", "INBOX", 10, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	// One FETCH for the scanned window, one for the rows, one per
+	// distinct snippet part path: bounded, not one per message.
+	if n := len(fake.fetches); n > 3 {
+		t.Fatalf("%d FETCH round trips for 8 messages, want at most 3: %v", n, fake.fetches)
+	}
+}
+
+func TestSnippetAndAttachmentEdges(t *testing.T) {
+	fake, addr := newFakeIMAP(t)
+	style := "<style>" + strings.Repeat(".c{color:red}", 250) + "</style>" // over 2 KB of head
+	fake.boxes["INBOX"] = append(fake.boxes["INBOX"],
+		&fakeMsg{uid: 9, internalDate: d(2026, 10, 4), from: "news", subject: "News",
+			raw: "From: news@example.com\r\nSubject: News\r\nDate: Sun, 04 Oct 2026 10:00:00 +0200\r\n" +
+				"Content-Type: text/html; charset=utf-8\r\n\r\n<html><head>" + style + "</head><body><p>Big sale today</p></body></html>\r\n"},
+		&fakeMsg{uid: 10, internalDate: d(2026, 10, 5), from: "cam", subject: "Photo",
+			raw: "From: cam@example.com\r\nSubject: Photo\r\nDate: Mon, 05 Oct 2026 10:00:00 +0200\r\n" +
+				"Content-Type: multipart/mixed; boundary=\"p\"\r\n\r\n" +
+				"--p\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nSee photo.\r\n" +
+				"--p\r\nContent-Type: image/png; name=\"photo.png\"\r\nContent-Transfer-Encoding: base64\r\n\r\n" +
+				"iVBORw0KGgo=\r\n--p--\r\n"},
+		&fakeMsg{uid: 11, internalDate: d(2026, 10, 6), from: "ru", subject: "Privet",
+			raw: "From: ru@example.com\r\nSubject: Privet\r\nDate: Tue, 06 Oct 2026 10:00:00 +0200\r\n" +
+				"Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n" +
+				strings.Repeat("=D0=9F", 400) + "\r\n"})
+	c := testClient(t, addr)
+	for run := 0; run < 10; run++ { // grouping iterates a map: repeat to catch order dependence
+		out, err := c.ListMail(context.Background(), "INBOX", 20, false, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		byUID := map[string]map[string]any{}
+		for _, m := range out["messages"].([]map[string]any) {
+			byUID[m["uid"].(string)] = m
+		}
+		if byUID["9"]["snippet"] != "Big sale today" {
+			t.Fatalf("run %d: HTML snippet behind a big head = %v", run, byUID["9"]["snippet"])
+		}
+		if s, _ := byUID["11"]["snippet"].(string); strings.ContainsAny(s, "=�") || s == "" {
+			t.Fatalf("run %d: cut quoted-printable snippet = %q", run, s)
+		}
+	}
+	out, err := c.ReadMail(context.Background(), "10", "INBOX", true, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := out["attachments"].([]map[string]any)
+	saved := out["attachments_saved"].([]map[string]any)
+	if len(listed) != 1 || listed[0]["name"] != "photo.png" || len(saved) != 1 || saved[0]["name"] != "photo.png" {
+		t.Fatalf("a named part without disposition: listed %v, saved %v", listed, saved)
+	}
+}
+
+func TestSearchReportsFailedLocalPass(t *testing.T) {
+	fake, addr := newFakeIMAP(t)
+	c := testClient(t, addr)
+	// Break the unbounded ALL search the local pass starts from: the
+	// server-side hits must stand, and the result must say the pass failed.
+	fake.failAllSearch = true
+	out, err := c.SearchMail(context.Background(), "boarding", "INBOX", 10, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out["local_pass_error"] == nil || out["scanned_recent"] != 0 || out["matched"] != 1 {
+		t.Fatalf("result = %v", out)
 	}
 }

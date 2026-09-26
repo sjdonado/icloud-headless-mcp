@@ -69,6 +69,9 @@ func summarise(kind string, params map[string]any) string {
 		}
 		return fmt.Sprintf("reminder \u201c%s\u201d on %s%s", str("title"), str("list_name"), due)
 	case "complete_reminder":
+		if str("title") == "" {
+			return fmt.Sprintf("ticking off reminder %s", str("id"))
+		}
 		return fmt.Sprintf("ticking off \u201c%s\u201d on %s", str("title"), str("list_name"))
 	default:
 		// No params in the fallback: a note body can be long, and this

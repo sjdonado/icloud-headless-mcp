@@ -1,7 +1,6 @@
 package mcpserver
 
 import (
-	"encoding/json"
 	"fmt"
 	"strconv"
 
@@ -120,12 +119,11 @@ func TruncateRunes(s string, n int) string {
 	return string(runes[:n])
 }
 
-// ErrorResult renders a domain error by convention: a result carrying
-// {"error": ...}, not a protocol-level failure.
+// ErrorResult renders a domain error: {"error": ...} with isError set, not
+// a protocol-level failure.
 func ErrorResult(msg string) (*mcp.CallToolResult, error) {
-	b, err := json.Marshal(map[string]any{"error": msg})
-	if err != nil {
-		return mcp.NewToolResultError(msg), nil
+	if msg == "" {
+		msg = "failed"
 	}
-	return mcp.NewToolResultText(string(b)), nil
+	return ResultJSON(map[string]any{"error": msg})
 }

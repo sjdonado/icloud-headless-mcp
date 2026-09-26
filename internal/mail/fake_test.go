@@ -11,6 +11,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/emersion/go-imap/v2"
+	"github.com/emersion/go-imap/v2/imapserver"
 )
 
 // fakeMsg is one mailbox message. from/subject are raw header values;
@@ -19,6 +22,7 @@ type fakeMsg struct {
 	uid          uint32
 	seen         bool
 	answered     bool
+	flagged      bool
 	internalDate time.Time
 	from         string
 	subject      string
@@ -89,6 +93,11 @@ type fakeIMAP struct {
 	mu       sync.Mutex
 	boxes    map[string][]*fakeMsg
 	searches []string
+	// fetches records each UID FETCH's arguments, for counting round trips.
+	fetches []string
+	// failAllSearch answers a bare ALL search with NO, as a flaky server
+	// would, to exercise the local pass's failure path.
+	failAllSearch bool
 }
 
 func newFakeIMAP(t *testing.T) (*fakeIMAP, string) {
@@ -199,7 +208,12 @@ func (f *fakeIMAP) serve(conn net.Conn) {
 			crit := strings.TrimSpace(rest[len("UID SEARCH"):])
 			f.mu.Lock()
 			f.searches = append(f.searches, crit)
+			failAll := f.failAllSearch && strings.EqualFold(strings.TrimSpace(crit), "ALL")
 			f.mu.Unlock()
+			if failAll {
+				fmt.Fprintf(conn, "%s NO search failed\r\n", tag)
+				continue
+			}
 			uids := f.search(selected, crit)
 			fmt.Fprintf(conn, "* SEARCH %s\r\n", strings.Join(uids, " "))
 			fmt.Fprintf(conn, "%s OK SEARCH completed\r\n", tag)
@@ -207,34 +221,14 @@ func (f *fakeIMAP) serve(conn net.Conn) {
 			rest := strings.TrimSpace(rest[len("UID FETCH"):])
 			set, items := splitSetItems(rest)
 			wanted := parseUIDSet(set)
-			headersOnly := strings.Contains(strings.ToUpper(items), "HEADER.FIELDS")
-			// Echo the requested section verbatim (minus PEEK): the client
-			// quotes header field names and matches the response section
-			// against the request.
-			section := "BODY[]"
-			if i := strings.Index(rest, "BODY.PEEK["); i >= 0 {
-				if tail := rest[i+len("BODY.PEEK["):]; true {
-					if j := strings.LastIndex(tail, "]"); j >= 0 {
-						section = "BODY[" + tail[:j+1]
-					}
-				}
-			}
+			f.mu.Lock()
+			f.fetches = append(f.fetches, rest)
+			f.mu.Unlock()
 			for i, m := range f.boxes[selected] {
 				if !wanted[m.uid] {
 					continue
 				}
-				var body []byte
-				if headersOnly {
-					body = headerBlock(m.raw)
-				} else {
-					body = []byte(m.raw)
-					section = "BODY[]"
-				}
-				// No CRLF between the literal bytes and ')': the literal's
-				// framing CRLF comes before its bytes, not after.
-				fmt.Fprintf(conn, "* %d FETCH (UID %d %s {%d}\r\n", i+1, m.uid, section, len(body))
-				conn.Write(body)
-				fmt.Fprintf(conn, ")\r\n")
+				f.writeFetch(conn, i+1, m, items)
 			}
 			fmt.Fprintf(conn, "%s OK FETCH completed\r\n", tag)
 		case strings.HasPrefix(upper, "LOGOUT"):
@@ -244,6 +238,141 @@ func (f *fakeIMAP) serve(conn net.Conn) {
 			fmt.Fprintf(conn, "%s BAD unknown command\r\n", tag)
 		}
 	}
+}
+
+// writeFetch answers one message of a UID FETCH: FLAGS, RFC822.SIZE,
+// INTERNALDATE, BODYSTRUCTURE, and at most one body section. The section
+// is echoed as requested (minus PEEK), because the client matches the
+// response section against its request. A non-PEEK body fetch sets \Seen,
+// as a real server does, so a read that forgets PEEK shows up in tests.
+func (f *fakeIMAP) writeFetch(conn net.Conn, seq int, m *fakeMsg, items string) {
+	up := strings.ToUpper(items)
+	parts := []string{fmt.Sprintf("UID %d", m.uid)}
+	if strings.Contains(up, "BODY[") && !strings.Contains(up, "BODY.PEEK[") {
+		m.seen = true
+	}
+	var flagItem string
+	if strings.Contains(up, "FLAGS") {
+		var flags []string
+		if m.seen {
+			flags = append(flags, `\Seen`)
+		}
+		if m.answered {
+			flags = append(flags, `\Answered`)
+		}
+		if m.flagged {
+			flags = append(flags, `\Flagged`)
+		}
+		// Sent last, after any body literal, as iCloud may: the client
+		// must not read flags off the first items of a response.
+		flagItem = " FLAGS (" + strings.Join(flags, " ") + ")"
+	}
+	if strings.Contains(up, "RFC822.SIZE") {
+		parts = append(parts, fmt.Sprintf("RFC822.SIZE %d", len(m.raw)))
+	}
+	if strings.Contains(up, "INTERNALDATE") {
+		parts = append(parts, `INTERNALDATE "`+m.internalDate.Format("02-Jan-2006 15:04:05 -0700")+`"`)
+	}
+	if strings.Contains(up, "BODYSTRUCTURE") {
+		parts = append(parts, "BODYSTRUCTURE "+bodyStructureWire(imapserver.ExtractBodyStructure(strings.NewReader(m.raw))))
+	}
+	var body []byte
+	section := ""
+	if i := strings.Index(up, "BODY.PEEK["); i >= 0 || strings.Contains(up, "BODY[") {
+		if i < 0 {
+			i = strings.Index(up, "BODY[") - 5
+		}
+		tail := items[i+len("BODY.PEEK["):]
+		j := strings.Index(tail, "]")
+		spec := tail[:j]
+		item := &imap.FetchItemBodySection{}
+		partial := ""
+		if k := strings.Index(tail[j:], "<"); k >= 0 && k == 1 {
+			lo, hi, _ := strings.Cut(strings.Trim(tail[j+1:j+strings.Index(tail[j:], ">")], "<>"), ".")
+			off, _ := strconv.ParseInt(lo, 10, 64)
+			size, _ := strconv.ParseInt(hi, 10, 64)
+			item.Partial = &imap.SectionPartial{Offset: off, Size: size}
+			partial = fmt.Sprintf("<%d>", off)
+		}
+		switch {
+		case strings.Contains(strings.ToUpper(spec), "HEADER.FIELDS"):
+			body = headerBlock(m.raw)
+		case spec == "":
+			body = []byte(m.raw)
+		default:
+			for _, n := range strings.Split(spec, ".") {
+				v, _ := strconv.Atoi(n)
+				item.Part = append(item.Part, v)
+			}
+			body = imapserver.ExtractBodySection(strings.NewReader(m.raw), item)
+		}
+		if item.Partial != nil && spec == "" {
+			body = body[:min(len(body), int(item.Partial.Size))]
+		}
+		section = fmt.Sprintf("BODY[%s]%s {%d}\r\n", spec, partial, len(body))
+	}
+	// No CRLF between the literal bytes and ')': the literal's framing
+	// CRLF comes before its bytes, not after.
+	fmt.Fprintf(conn, "* %d FETCH (%s", seq, strings.Join(parts, " "))
+	if section != "" {
+		fmt.Fprintf(conn, " %s", section)
+		conn.Write(body)
+	}
+	fmt.Fprintf(conn, "%s)\r\n", flagItem)
+}
+
+// bodyStructureWire serializes an extended BODYSTRUCTURE (RFC 3501 7.4.2)
+// from go-imap's own extractor, so the client parses real structure.
+func bodyStructureWire(bs imap.BodyStructure) string {
+	q := func(v string) string {
+		if v == "" {
+			return "NIL"
+		}
+		return strconv.Quote(v)
+	}
+	params := func(m map[string]string) string {
+		if len(m) == 0 {
+			return "NIL"
+		}
+		keys := make([]string, 0, len(m))
+		for k := range m {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		var out []string
+		for _, k := range keys {
+			out = append(out, strconv.Quote(k)+" "+strconv.Quote(m[k]))
+		}
+		return "(" + strings.Join(out, " ") + ")"
+	}
+	disp := func(d *imap.BodyStructureDisposition) string {
+		if d == nil {
+			return "NIL"
+		}
+		return "(" + strconv.Quote(d.Value) + " " + params(d.Params) + ")"
+	}
+	switch bs := bs.(type) {
+	case *imap.BodyStructureMultiPart:
+		var b strings.Builder
+		b.WriteString("(")
+		for _, child := range bs.Children {
+			b.WriteString(bodyStructureWire(child))
+		}
+		b.WriteString(" " + strconv.Quote(bs.Subtype) + " " + params(bs.Extended.Params) + " " + disp(bs.Extended.Disposition) + " NIL NIL)")
+		return b.String()
+	case *imap.BodyStructureSinglePart:
+		enc := bs.Encoding
+		if enc == "" {
+			enc = "7BIT"
+		}
+		out := fmt.Sprintf("(%s %s %s %s %s %s %d", strconv.Quote(bs.Type), strconv.Quote(bs.Subtype),
+			params(bs.Params), q(bs.ID), q(bs.Description), strconv.Quote(enc), bs.Size)
+		if bs.Text != nil {
+			out += fmt.Sprintf(" %d", bs.Text.NumLines)
+		}
+		return out + " NIL " + disp(bs.Extended.Disposition) + " NIL NIL)"
+	}
+	return "NIL"
 }
 
 // search matches against raw headers (no encoded-word decoding) with AND

@@ -168,3 +168,32 @@ func TestHostZone(t *testing.T) {
 }
 
 func contains(s, sub string) bool { return strings.Contains(s, sub) }
+
+func TestISOTimeAcrossZonesAndDST(t *testing.T) {
+	ams, err := time.LoadLocation("Europe/Amsterdam")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bog, err := time.LoadLocation("America/Bogota")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		in    time.Time
+		owner *time.Location
+		want  string
+	}{
+		{time.Date(2026, 3, 29, 0, 30, 0, 0, time.UTC), ams, "2026-03-29T01:30:00+01:00"}, // before the spring jump
+		{time.Date(2026, 3, 29, 1, 30, 0, 0, time.UTC), ams, "2026-03-29T03:30:00+02:00"}, // after it
+		{time.Date(2026, 10, 25, 0, 30, 0, 0, time.UTC), ams, "2026-10-25T02:30:00+02:00"},
+		{time.Date(2026, 10, 25, 1, 30, 0, 0, time.UTC), ams, "2026-10-25T02:30:00+01:00"}, // the repeated hour keeps its offset
+		{time.Date(2026, 3, 29, 1, 30, 0, 0, time.UTC), bog, "2026-03-28T20:30:00-05:00"},
+	} {
+		if got := ISOTime(tc.in, tc.owner); got != tc.want {
+			t.Errorf("ISOTime(%v, %s) = %s, want %s", tc.in, tc.owner, got, tc.want)
+		}
+	}
+	if got := ISODate(time.Date(2026, 3, 29, 23, 0, 0, 0, bog)); got != "2026-03-29" {
+		t.Errorf("ISODate = %s", got)
+	}
+}
