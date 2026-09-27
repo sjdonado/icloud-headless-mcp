@@ -2,7 +2,7 @@
 
 **Give any AI agent your iCloud: Calendar, Contacts, Mail, Notes, Reminders and Drive. One binary, a headless Chrome, two environment variables. No Mac required.**
 
-![pi reading an iCloud account through the MCP: calendars, inbox, reminder lists, Notes folders and the Drive status in one prompt](docs/img/pi-overview.png)
+![pi answering "what needs my attention?" through the MCP in one prompt: who sent the latest reply in a mail thread and who else is on it, open reminders across two lists with due dates, and the most recently edited notes with their folders](docs/img/pi-overview.png)
 
 Apple gives Notes and Reminders no API at all, and the parts that do have one are scattered across CalDAV, CardDAV and IMAP. So most iCloud automation quietly assumes a Mac on your desk running AppleScript. This server removes the Mac: calendar, contacts and mail go over the open protocols, and Notes and Reminders are driven through the real iCloud web apps in a headless Chrome that stays signed in. It runs on your laptop, a small VPS or a Raspberry Pi, and any MCP client that can spawn a process can use it.
 
