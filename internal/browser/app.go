@@ -328,7 +328,7 @@ func (app App) Open(state State, owner *time.Location, now time.Time) (*Tab, err
 	if navigated && QuietHoursAt(owner, now) {
 		// Refuse rather than ask: the only place that would raise an
 		// approval prompt overnight.
-		_ = conn.call("", "Target.detachFromTarget", map[string]any{"sessionId": session}, nil)
+		conn.tabDetach(session)
 		if openedHere {
 			_ = cdp.CloseTarget(tab.ID)
 		}
@@ -344,7 +344,7 @@ func (app App) Open(state State, owner *time.Location, now time.Time) (*Tab, err
 		// the telemetry.
 		state.LogAsk("page-load", app.Name, "no-notifier")
 		if err := conn.navigate(session, app.URL); err != nil {
-			_ = conn.call("", "Target.detachFromTarget", map[string]any{"sessionId": session}, nil)
+			conn.tabDetach(session)
 			return fail(err)
 		}
 	}
@@ -407,7 +407,7 @@ func (app App) Open(state State, owner *time.Location, now time.Time) (*Tab, err
 	text, _ := conn.frameTexts(tab.ID)
 	if isBlocked(text) {
 		state.LatchBlocked(fmt.Sprintf("%s reported a lapsed grant", app.Name))
-		_ = conn.call("", "Target.detachFromTarget", map[string]any{"sessionId": session}, nil)
+		conn.tabDetach(session)
 		if openedHere {
 			_ = cdp.CloseTarget(tab.ID)
 		}
@@ -419,7 +419,7 @@ func (app App) Open(state State, owner *time.Location, now time.Time) (*Tab, err
 				"a sign-in problem; the session is fine and it is the data-access grant "+
 				"that lapsed.", app.Name)}
 	}
-	_ = conn.call("", "Target.detachFromTarget", map[string]any{"sessionId": session}, nil)
+	conn.tabDetach(session)
 	if openedHere {
 		_ = cdp.CloseTarget(tab.ID)
 	}
@@ -459,6 +459,12 @@ func (t *Tab) ClosePage() {
 // data-access grant. Goto, never reload: reloading an iCloud app tab
 // reliably kills Chromium; navigating does not. The timezone override is
 // re-applied first, because a fresh navigation is a fresh startup.
+//
+// With no tab for the app (a browser restart, a crash or the tab reaper
+// while the grant was latched, when nothing else opens one), it opens
+// one: a blank tab, the override, then the navigation, so the app starts
+// in the owner's zone. The caller asked for the prompt, so loading the
+// app is the point.
 func Renavigate(cdp *CDP, pageURL, zone string) error {
 	targets, err := cdp.Targets()
 	if err != nil {
@@ -470,9 +476,6 @@ func Renavigate(cdp *CDP, pageURL, zone string) error {
 			tab = &targets[i]
 		}
 	}
-	if tab == nil {
-		return fmt.Errorf("no tab for %s", pageURL)
-	}
 	wsURL, err := cdp.DebuggerURL()
 	if err != nil {
 		return err
@@ -482,19 +485,37 @@ func Renavigate(cdp *CDP, pageURL, zone string) error {
 		return err
 	}
 	defer conn.close()
+	openedHere := tab == nil
+	if openedHere {
+		id, err := conn.newTab("about:blank")
+		if err != nil {
+			return fmt.Errorf("could not open a tab for %s: %w", pageURL, err)
+		}
+		tab = &Target{ID: id, Type: "page", URL: "about:blank"}
+	}
+	fail := func(err error) error {
+		if openedHere {
+			_ = cdp.CloseTarget(tab.ID)
+		}
+		return err
+	}
 	session, err := conn.tabAttach(tab.ID)
 	if err != nil {
-		return err
+		return fail(err)
 	}
 	defer conn.tabDetach(session)
 	conn.setTimezone(session, zone)
 	if err := conn.navigate(session, pageURL); err != nil {
-		return err
+		return fail(err)
 	}
-	sleepMS(8000)
+	sleepMS(RenavigateSettleMS)
 	_, _ = conn.isolatedWorld(session, tab.ID, "", `() => { window.__agentTzApplied = true; }`, nil)
 	return nil
 }
+
+// RenavigateSettleMS is how long a re-ask waits for the app to start
+// loading before it lets go of the tab. A variable so tests skip it.
+var RenavigateSettleMS = 8000
 
 // OpenDriveTab opens the Drive app in its own tab and sniffs the API
 // request URLs it emits. It returns early once enoughURLs is satisfied,

@@ -294,18 +294,42 @@ func (c *wsConn) tabAttach(targetID string) (string, error) {
 	var attached struct {
 		SessionID string `json:"sessionId"`
 	}
-	if err := c.call("", "Target.attachToTarget",
-		map[string]any{"targetId": targetID, "flatten": true}, &attached); err != nil {
+	// One lock hold for the attach and its record, so a re-dial cannot
+	// fall between them and leave a session from the old socket.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.broken {
+		if err := c.redial(); err != nil {
+			return "", err
+		}
+	}
+	if err := c.roundTrip("", "Target.attachToTarget",
+		map[string]any{"targetId": targetID, "flatten": true}, &attached, 300*time.Second); err != nil {
 		return "", err
 	}
+	c.tabs[attached.SessionID] = &attachment{target: targetID, session: attached.SessionID}
 	return attached.SessionID, nil
 }
 
 func (c *wsConn) tabDetach(session string) {
 	// Canonical form: the session id travels as the detach parameter, not
 	// the envelope. The envelope form addresses the session being
-	// detached, which is exactly what is going away.
-	_ = c.call("", "Target.detachFromTarget", map[string]any{"sessionId": session}, nil)
+	// detached, which is exactly what is going away. The parameter is
+	// not translated by call, so the live id is looked up here.
+	c.mu.Lock()
+	live := session
+	if a := c.tabs[session]; a != nil {
+		live = a.session
+	}
+	delete(c.tabs, session)
+	broken := c.broken
+	c.mu.Unlock()
+	if broken {
+		// Re-dialling only to detach is pointless: the old socket took
+		// its sessions with it.
+		return
+	}
+	_ = c.call("", "Target.detachFromTarget", map[string]any{"sessionId": live}, nil)
 }
 
 // Navigate loads url in the tab. Goto, never reload: reloading an iCloud
@@ -328,16 +352,30 @@ func (c *wsConn) newTab(url string) (string, error) {
 // GrantClipboard allows clipboard read/write on the iCloud origin, which
 // the canvas-copy and paste flows need.
 func (c *wsConn) grantClipboard() error {
-	return c.call("", "Browser.grantPermissions", map[string]any{
-		"origin":      "https://www.icloud.com",
-		"permissions": []string{"clipboardReadWrite", "clipboardSanitizedWrite"},
-	}, nil)
+	if err := c.call("", "Browser.grantPermissions", clipboardGrant, nil); err != nil {
+		return err
+	}
+	// The grant lasts as long as the connection, so a re-dial repeats it.
+	c.mu.Lock()
+	c.clipboard = true
+	c.mu.Unlock()
+	return nil
+}
+
+var clipboardGrant = map[string]any{
+	"origin":      "https://www.icloud.com",
+	"permissions": []string{"clipboardReadWrite", "clipboardSanitizedWrite"},
 }
 
 // SetTimezone makes the page believe it is in the owner's zone. Best
 // effort: the override must precede the app load to matter, and callers
 // arrange that; a failure here degrades to UTC behavior, not an error.
 func (c *wsConn) setTimezone(session, zone string) {
+	c.mu.Lock()
+	if a := c.tabs[session]; a != nil {
+		a.zone = zone
+	}
+	c.mu.Unlock()
 	_ = c.call(session, "Emulation.setTimezoneOverride", map[string]any{"timezoneId": zone}, nil)
 	_, _ = c.isolatedWorld(session, "", "", `() => { window.__agentTzApplied = true; }`, nil)
 }

@@ -40,14 +40,15 @@ func runHealthImport(args []string) int {
 	// so a failing run leaves committed work behind, and "import failed"
 	// alone reads as "nothing happened". The operator re-running after a
 	// fix needs to know the state the store is already in.
-	seen, fresh, refreshed := 0, 0, 0
+	seen, fresh, refreshed, deleted := 0, 0, 0, 0
 	for _, r := range res {
-		fmt.Printf("%s: %d seen, %d new, %d updated\n", r.File, r.Seen, r.New, r.Updated)
+		fmt.Printf("%s: %d seen, %d new, %d updated, %d deleted\n", r.File, r.Seen, r.New, r.Updated, r.Deleted)
 		seen += r.Seen
 		fresh += r.New
 		refreshed += r.Updated
+		deleted += r.Deleted
 	}
-	fmt.Printf("%d files, %d rows seen, %d new, %d updated\n", len(res), seen, fresh, refreshed)
+	fmt.Printf("%d files, %d rows seen, %d new, %d updated, %d deleted\n", len(res), seen, fresh, refreshed, deleted)
 	fmt.Printf("store: %s\n", cfg.HealthDB)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "import failed: %v\n", err)

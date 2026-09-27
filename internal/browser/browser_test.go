@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -30,6 +31,9 @@ type fakeCDP struct {
 	created    []string
 	frameURLs  map[string]string
 	evalArrays map[string][]any
+	calls      []string
+	attaches   int
+	navigated  []string
 }
 
 func newFakeCDP(t *testing.T) (*fakeCDP, *httptest.Server, *CDP) {
@@ -71,13 +75,15 @@ func (f *fakeCDP) reply(ws *nws.Conn, id float64, result any) {
 	if err != nil {
 		f.t.Fatalf("fake marshal: %v", err)
 	}
-	if err := ws.Write(context.Background(), nws.MessageText, raw); err != nil {
-		f.t.Fatalf("fake send: %v", err)
-	}
+	// A client that refused a message has hung up; nothing to report.
+	_ = ws.Write(context.Background(), nws.MessageText, raw)
 }
 
 func (f *fakeCDP) serveWS(ws *nws.Conn) {
 	attached := ""
+	// Sessions live on the connection that attached them, as in Chrome:
+	// a session id from another connection is refused.
+	sessions := map[string]bool{}
 	for {
 		_, data, err := ws.Read(context.Background())
 		if err != nil {
@@ -92,6 +98,15 @@ func (f *fakeCDP) serveWS(ws *nws.Conn) {
 		params, _ := msg["params"].(map[string]any)
 		f.mu.Lock()
 		f.hits[method]++
+		f.calls = append(f.calls, method)
+		if sid, _ := msg["sessionId"].(string); sid != "" && !sessions[sid] {
+			f.mu.Unlock()
+			raw, _ := json.Marshal(map[string]any{
+				"id": id, "error": map[string]any{"message": "Session with given id not found."},
+			})
+			_ = ws.Write(context.Background(), nws.MessageText, raw)
+			continue
+		}
 		switch method {
 		case "Storage.getCookies":
 			cookies := f.cookies
@@ -111,14 +126,22 @@ func (f *fakeCDP) serveWS(ws *nws.Conn) {
 			if p, ok := params["targetId"].(string); ok {
 				attached = p
 			}
+			f.attaches++
+			sid := "S" + strconv.Itoa(f.attaches)
+			sessions[sid] = true
 			f.mu.Unlock()
-			f.reply(ws, id, map[string]any{"sessionId": "S1"})
+			f.reply(ws, id, map[string]any{"sessionId": sid})
 		case "Target.createTarget":
 			u, _ := params["url"].(string)
 			f.created = append(f.created, u)
 			f.mu.Unlock()
 			f.reply(ws, id, map[string]any{"targetId": "t-new"})
-		case "Page.navigate", "Target.detachFromTarget", "Page.bringToFront",
+		case "Page.navigate":
+			u, _ := params["url"].(string)
+			f.navigated = append(f.navigated, u)
+			f.mu.Unlock()
+			f.reply(ws, id, map[string]any{})
+		case "Target.detachFromTarget", "Page.bringToFront",
 			"Browser.grantPermissions", "Emulation.setTimezoneOverride", "Network.enable":
 			f.mu.Unlock()
 			f.reply(ws, id, map[string]any{})
@@ -506,5 +529,132 @@ func TestSignOutWipesTheLocalSession(t *testing.T) {
 	}
 	if res.TabsClosed != 2 {
 		t.Fatalf("closed %d app tabs (%v), want the Notes and Reminders tabs", res.TabsClosed, fake.closed)
+	}
+}
+
+// dialFake attaches to one target of the fake browser the way a Tab does.
+func dialFake(t *testing.T, cdp *CDP, target string) (*wsConn, string) {
+	t.Helper()
+	wsURL, err := cdp.DebuggerURL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := dialWS(wsURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.close() })
+	session, err := conn.tabAttach(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return conn, session
+}
+
+// TestCDPReadsReplyOver32KiB covers the box's failure: a Reminders
+// records reply over the websocket library's default 32 KiB limit was
+// refused ("read limited at 32769 bytes").
+func TestCDPReadsReplyOver32KiB(t *testing.T) {
+	fake, _, cdp := newFakeCDP(t)
+	fake.targets = []Target{{ID: "t-app", Type: "page", URL: "https://www.icloud.com/reminders/"}}
+	fake.frameURLs["t-app"] = "https://www.icloud.com/reminders/reminders2.html"
+	big := strings.Repeat("r", 5<<20)
+	fake.evalArrays["t-app"] = []any{big}
+	conn, session := dialFake(t, cdp, "t-app")
+	raw, err := conn.isolatedWorld(session, "t-app", "reminders2", `() => ""`, nil)
+	if err != nil {
+		t.Fatalf("large reply: %v", err)
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil || len(s) != len(big) {
+		t.Fatalf("got %d bytes, %v; want %d", len(s), err, len(big))
+	}
+}
+
+// TestCDPCallAfterFailedRead covers the call after a refused message: the
+// same connection resumed mid-frame and failed with "unexpected rsv bits".
+// It re-dials instead, re-attaches the tab and keeps the caller's session
+// id working, timezone included.
+func TestCDPCallAfterFailedRead(t *testing.T) {
+	fake, _, cdp := newFakeCDP(t)
+	defer func(n int64) { cdpReadLimit = n }(cdpReadLimit)
+	cdpReadLimit = 4096
+	fake.targets = []Target{{ID: "t-app", Type: "page", URL: "https://www.icloud.com/reminders/"}}
+	fake.frameURLs["t-app"] = "https://www.icloud.com/reminders/reminders2.html"
+	fake.evalArrays["t-app"] = []any{"tz marker", strings.Repeat("r", 64<<10), "small"}
+	conn, session := dialFake(t, cdp, "t-app")
+	conn.setTimezone(session, "Europe/Berlin")
+	if _, err := conn.isolatedWorld(session, "t-app", "reminders2", `() => ""`, nil); err == nil {
+		t.Fatal("reply over the lowered limit was read")
+	}
+	fake.mu.Lock()
+	tzBefore := fake.hits["Emulation.setTimezoneOverride"]
+	fake.mu.Unlock()
+	raw, err := conn.isolatedWorld(session, "t-app", "reminders2", `() => ""`, nil)
+	if err != nil {
+		t.Fatalf("call after the failed read: %v", err)
+	}
+	if string(raw) != `"small"` {
+		t.Fatalf("got %s", raw)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.attaches != 2 {
+		t.Fatalf("attaches = %d, want the tab re-attached once", fake.attaches)
+	}
+	if fake.hits["Emulation.setTimezoneOverride"] != tzBefore+1 {
+		t.Fatal("the re-attached session lost its timezone override")
+	}
+}
+
+// TestRenavigateOpensMissingTab covers the re-ask deadlock: the grant is
+// latched, the browser restarted, and only the icloud.com page is left.
+// The re-ask opens the app tab, applies the owner's zone before the
+// navigation, and never answers "no tab for".
+func TestRenavigateOpensMissingTab(t *testing.T) {
+	fake, _, cdp := newFakeCDP(t)
+	defer func(n int) { RenavigateSettleMS = n }(RenavigateSettleMS)
+	RenavigateSettleMS = 0
+	state := testState(t)
+	state.LatchBlocked("reminders reported a lapsed grant")
+	fake.targets = []Target{{ID: "t-home", Type: "page", URL: "https://www.icloud.com/"}}
+	if err := Renavigate(cdp, "https://www.icloud.com/reminders/", "Europe/Berlin"); err != nil {
+		t.Fatalf("Renavigate: %v", err)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.created) != 1 || fake.created[0] != "about:blank" {
+		t.Fatalf("created = %v, want one blank tab", fake.created)
+	}
+	if len(fake.navigated) != 1 || fake.navigated[0] != "https://www.icloud.com/reminders/" {
+		t.Fatalf("navigated = %v, want the app URL once", fake.navigated)
+	}
+	tz, nav := -1, -1
+	for i, m := range fake.calls {
+		if m == "Emulation.setTimezoneOverride" && tz < 0 {
+			tz = i
+		}
+		if m == "Page.navigate" {
+			nav = i
+		}
+	}
+	if tz < 0 || tz > nav {
+		t.Fatalf("calls = %v, want the timezone override before the navigation", fake.calls)
+	}
+	if len(fake.closed) != 0 {
+		t.Fatalf("closed = %v, the new app tab must stay open", fake.closed)
+	}
+}
+
+func TestRenavigateReusesExistingTab(t *testing.T) {
+	fake, _, cdp := newFakeCDP(t)
+	defer func(n int) { RenavigateSettleMS = n }(RenavigateSettleMS)
+	RenavigateSettleMS = 0
+	fake.targets = appTargets()
+	if err := Renavigate(cdp, "https://www.icloud.com/reminders/", "Europe/Berlin"); err != nil {
+		t.Fatalf("Renavigate: %v", err)
+	}
+	if len(fake.created) != 0 || fake.hits["Page.navigate"] != 1 {
+		t.Fatalf("created = %v, navigations = %d", fake.created, fake.hits["Page.navigate"])
 	}
 }

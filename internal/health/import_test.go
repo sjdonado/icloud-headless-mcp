@@ -250,8 +250,16 @@ func TestTombstoneMonthDeletesStoredSampleIdempotently(t *testing.T) {
 	}
 	writeFile(t, filepath.Join(root, "_tombstones", "2026-09.jsonl"), tombLine("DE7CEE4A-C7B2-4329-8590-153E22134F00"))
 	for pass := 0; pass < 2; pass++ { // a second import of the same files changes nothing
-		if _, err := ImportDir(db, root, time.Now()); err != nil {
+		res, err := ImportDir(db, root, time.Now())
+		if err != nil {
 			t.Fatal(err)
+		}
+		deleted := 0
+		for _, r := range res {
+			deleted += r.Deleted
+		}
+		if want := 1 - pass; deleted != want {
+			t.Fatalf("pass %d: reported %d deleted, want %d", pass, deleted, want)
 		}
 		if got := count(t, db, `SELECT COUNT(*) FROM samples`); got != 0 {
 			t.Fatalf("pass %d: the tombstoned sample survived (%d rows)", pass, got)
