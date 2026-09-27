@@ -218,6 +218,19 @@ func evalString(tab *browser.Tab, expr string, arg any) string {
 // clearSearch leaves the search box empty, so the next call does not read
 // a filtered list. Clearing through the keyboard: setting .value leaves
 // the app's own state holding the old query.
+// searchQuery is the search box's current text, "" when empty or absent.
+func (c *Client) searchQuery(tab *browser.Tab) string {
+	raw, err := tab.Eval(clearSearchJS, nil)
+	if err != nil {
+		return ""
+	}
+	var current *string
+	if json.Unmarshal(raw, &current) != nil || current == nil {
+		return ""
+	}
+	return strings.TrimSpace(*current)
+}
+
 func (c *Client) clearSearch(tab *browser.Tab) {
 	if !evalBool(tab, focusSearchJS, nil) {
 		return
@@ -246,6 +259,18 @@ func sleep(ms int) { time.Sleep(time.Duration(ms) * time.Millisecond) }
 // selectAllICloud resets the tab to the unfiltered list. The tab is reused
 // between calls and may still show whatever folder the last call selected.
 func (c *Client) selectAllICloud(tab *browser.Tab) {
+	allSelected := func() bool {
+		return strings.HasPrefix(strings.ToLower(strings.TrimSpace(evalString(tab, selectedFolderJS, nil))), "all icloud")
+	}
+	// Already selected with no search filtering the list is the common
+	// case after a read, and skips the click. A leftover query is cleared
+	// the way Search clears it, then the click resets the list; openFolder
+	// leaves another folder selected, which clicks too.
+	if c.searchQuery(tab) != "" {
+		c.clearSearch(tab)
+	} else if allSelected() {
+		return
+	}
 	names, err := tab.Collect("folder-list-item-container")
 	if err != nil {
 		return
@@ -253,7 +278,12 @@ func (c *Client) selectAllICloud(tab *browser.Tab) {
 	for i, n := range names {
 		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(n)), "all icloud") {
 			_, _ = tab.Click("folder-title-select-button", i)
-			sleep(4000)
+			// Wait on the folder tree's own selection marker, as openFolder
+			// proves a folder, instead of a fixed 4 s.
+			for waited := 0; waited < 6000 && !allSelected(); waited += 200 {
+				sleep(200)
+			}
+			sleep(700) // the list re-renders right after the selection flips
 			return
 		}
 	}
@@ -601,8 +631,19 @@ func (c *Client) Read(ctx context.Context, id, title string, folder *string, mat
 		if id != "" {
 			return c.readRecord(tab, id, offset)
 		}
+		// By title through the records first: every note, not only the
+		// rows the virtualised page list has drawn, and no clicks. The
+		// page flow stays for when the records do not answer or a body
+		// does not decode.
+		recOut, ok, why := c.readTitleFromRecords(tab, title, folder, match, offset)
+		if ok {
+			return recOut, nil
+		}
 		vn, errMap := c.openVerified(tab, title, folder, match)
 		if errMap != nil {
+			if why != "" {
+				errMap["records_error"] = why
+			}
 			return errMap, nil
 		}
 		out := map[string]any{
@@ -613,6 +654,9 @@ func (c *Client) Read(ctx context.Context, id, title string, folder *string, mat
 			out[k] = v
 		}
 		c.withRecordIDs(tab, []map[string]any{out})
+		if why != "" {
+			out["records_error"] = why
+		}
 		return out, nil
 	})
 }
@@ -880,7 +924,7 @@ func (c *Client) replaceBody(ctx context.Context, title, body string, folder *st
 			return refused, nil
 		}
 		previous := vn.text
-		html := "<h1>" + Escape(vn.row.Title) + "</h1>" + MarkdownToHTML(body)
+		html := TitleHTML(vn.row.Title, body) + MarkdownToHTML(body)
 		if clip := writeClipboard(tab, html); clip != "ok" {
 			return map[string]any{"updated": false, "title": vn.row.Title,
 				"error": fmt.Sprintf("the clipboard was refused, so nothing was replaced: %s", clip)}, nil

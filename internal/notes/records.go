@@ -250,6 +250,114 @@ func (c *Client) joinIDs(notes []noteRec, folders map[string]string, rows []map[
 	}
 }
 
+// readTitleFromRecords is notes_read by title over the record store, with
+// the page flow's substring and folder rules (exact folder name first),
+// newest modified first. ok is false when the page should answer instead,
+// with why saying so when it was a failure rather than a hand-off:
+//   - the records did not answer, or the body did not decode;
+//   - no note matched: the page also sees notes this zone may not hold
+//     (shared with the owner), so a miss is the page's to confirm;
+//   - the folder did not resolve: the page names the folders;
+//   - match was given: its index refers to the page's order, the one
+//     update_note resolves match against.
+//
+// An ambiguous title is answered here, steering to the id.
+func (c *Client) readTitleFromRecords(tab *browser.Tab, title string, folder *string, match *int, offset int) (map[string]any, bool, string) {
+	if match != nil {
+		return nil, false, ""
+	}
+	raw, err := tab.EvalMain(notesListJS, nil)
+	if err != nil {
+		return nil, false, shortError(err)
+	}
+	var got struct {
+		Notes   []noteRec         `json:"notes"`
+		Folders map[string]string `json:"folders"`
+		Partial bool              `json:"partial"`
+		Error   string            `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		return nil, false, err.Error()
+	}
+	if got.Error != "" || got.Partial {
+		return nil, false, "the note records did not answer in full"
+	}
+	folders := map[string]string{}
+	for n, t := range got.Folders {
+		folders[n] = strings.TrimSpace(b64Text(t))
+	}
+	hits, resolved := matchNoteTitles(got.Notes, folders, title, folder)
+	if !resolved || len(hits) == 0 {
+		return nil, false, ""
+	}
+	if len(hits) > 1 {
+		candidates := []map[string]any{}
+		for _, r := range hits {
+			candidates = append(candidates, c.noteRow(r, folders))
+		}
+		return map[string]any{"error": fmt.Sprintf("%d notes match %q; pass one of their ids (or folder= to narrow) rather than getting one of them at random", len(hits), title),
+			"matches": candidates, "source": "records"}, true, ""
+	}
+	out, err := c.readRecord(tab, hits[0].N, offset)
+	if err != nil {
+		return nil, false, shortError(err)
+	}
+	// A body that does not decode (or a locked note, which the records do
+	// not flag) is the page flow's to answer.
+	if msg, bad := out["error"].(string); bad {
+		return nil, false, msg
+	}
+	return out, true, ""
+}
+
+// matchNoteTitles is the title and folder filter readTitleFromRecords
+// applies, newest modified first. resolved is false when folder names no
+// folder at all.
+func matchNoteTitles(notes []noteRec, folders map[string]string, title string, folder *string) ([]noteRec, bool) {
+	want := strings.ToLower(strings.TrimSpace(title))
+	var live []noteRec
+	for _, r := range notes {
+		if !r.Del && r.Folder != trashFolder {
+			live = append(live, r)
+		}
+	}
+	if folder != nil {
+		wanted := strings.ToLower(strings.TrimSpace(*folder))
+		exact, someMatch := false, false
+		for n, name := range folders {
+			if n == trashFolder {
+				continue
+			}
+			exact = exact || strings.EqualFold(name, wanted)
+			someMatch = someMatch || strings.Contains(strings.ToLower(name), wanted)
+		}
+		if !someMatch {
+			return nil, false
+		}
+		var in []noteRec
+		for _, r := range live {
+			name := strings.ToLower(folders[r.Folder])
+			if (exact && name == wanted) || (!exact && strings.Contains(name, wanted)) {
+				in = append(in, r)
+			}
+		}
+		live = in
+	}
+	sort.Slice(live, func(i, j int) bool {
+		if live[i].Md != live[j].Md {
+			return live[i].Md > live[j].Md
+		}
+		return live[i].N < live[j].N
+	})
+	var hits []noteRec
+	for _, r := range live {
+		if strings.Contains(strings.ToLower(strings.TrimSpace(b64Text(r.Title))), want) {
+			hits = append(hits, r)
+		}
+	}
+	return hits, true
+}
+
 // noteBody is a decoded TextDataEncrypted: the text, the checklist lines
 // and the attachments, following Apple's Notes protobuf (NoteStoreProto
 // field 2 Document, field 3 Note; Note field 2 is the text and field 5

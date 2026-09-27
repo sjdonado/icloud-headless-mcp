@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"compress/zlib"
 	"encoding/base64"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -27,9 +28,6 @@ func TestMarkdownVectors(t *testing.T) {
 		{"- a\n\ntext\n", "<ul><li>a</li></ul><p>text</p>"},
 		{"- a\n  - b\n    - c\n- d\n",
 			"<ul><li>a<ul><li>b<ul><li>c</li></ul></li></ul></li><li>d</li></ul>"},
-		{"- [ ] todo\n  - [x] done\n",
-			`<ul><li data-checked="false">todo` +
-				`<ul><li data-checked="true">done</li></ul></li></ul>`},
 		{"- a\n- b\n\n1. x\n2. y\n",
 			"<ul><li>a</li><li>b</li></ul><ol><li>x</li><li>y</li></ol>"},
 		{"1. first\n   and more words\n2. second\n",
@@ -296,5 +294,88 @@ func TestJoinIDsOnlyWhenUnique(t *testing.T) {
 		if row["id"] != want[i] {
 			t.Errorf("row %d (%v) got id %v, want %v", i, row["title"], row["id"], want[i])
 		}
+	}
+}
+
+// Checklist items use the web editor's own clipboard format, the only one
+// it pastes as a checklist (paragraph style 103 with a todo). Anything
+// else lands as a bulleted list and loses the done state.
+func TestChecklistUsesEditorFormat(t *testing.T) {
+	html := MarkdownToHTML("- [ ] todo\n  - [x] done\n")
+	item := regexp.MustCompile(`<li><p><span data-tt="\{&quot;paragraphStyle&quot;:\{&quot;style&quot;:103,&quot;todo&quot;:\{&quot;todoUUID&quot;:\{(&quot;\d+&quot;:\d+,?){16}\},&quot;done&quot;:(true|false)\}\}\}" style="white-space: pre-wrap;">(todo|done)\n</span></p>`)
+	got := item.FindAllStringSubmatch(html, -1)
+	if len(got) != 2 || got[0][2] != "false" || got[0][3] != "todo" || got[1][2] != "true" || got[1][3] != "done" {
+		t.Fatalf("checklist html = %s", html)
+	}
+	if !strings.Contains(html, "</p><ul><li><p>") {
+		t.Fatalf("the nested item is not inside its parent's item: %s", html)
+	}
+	if a, b := MarkdownToHTML("- [ ] x\n"), MarkdownToHTML("- [ ] x\n"); a == b {
+		t.Fatal("two items share a todoUUID; each needs its own")
+	}
+}
+
+func TestChecklistBodyKeepsLinesInInternalFormat(t *testing.T) {
+	html := MarkdownToHTML("Intro line.\n\n# Heading\n\n- [ ] one\n- bullet\n")
+	for _, want := range []string{
+		`<p><span data-tt="{}" style="white-space: pre-wrap;">Intro line.\n</span></p>`,
+		`&quot;style&quot;:1}}" style="white-space: pre-wrap;">Heading\n</span></p>`,
+		`&quot;style&quot;:100}}" style="white-space: pre-wrap;">bullet\n</span></p>`,
+	} {
+		if want = strings.ReplaceAll(want, `\n`, "\n"); !strings.Contains(html, want) {
+			t.Errorf("missing %s in %s", want, html)
+		}
+	}
+	if plain := MarkdownToHTML("Intro line.\n- bullet\n"); strings.Contains(plain, "data-tt") {
+		t.Fatalf("a body without a checklist must keep plain HTML: %s", plain)
+	}
+}
+
+func TestMatchNoteTitlesMirrorsPageRules(t *testing.T) {
+	enc := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	folders := map[string]string{"F1": "Work", "F2": "Homework", trashFolder: "Recently Deleted"}
+	notes := []noteRec{
+		{N: "old", Title: enc("Plan A"), Folder: "F1", Md: 1},
+		{N: "new", Title: enc("Plan B"), Folder: "F2", Md: 9},
+		{N: "trash", Title: enc("Plan C"), Folder: trashFolder, Md: 5},
+		{N: "del", Title: enc("Plan D"), Folder: "F1", Md: 6, Del: true},
+		{N: "other", Title: enc("Groceries"), Folder: "F1", Md: 3},
+	}
+	ids := func(rs []noteRec) string {
+		var out []string
+		for _, r := range rs {
+			out = append(out, r.N)
+		}
+		return strings.Join(out, ",")
+	}
+	if hits, _ := matchNoteTitles(notes, folders, "plan", nil); ids(hits) != "new,old" {
+		t.Errorf("plan = %s, want newest first, trash and deleted excluded", ids(hits))
+	}
+	work := "work"
+	if hits, _ := matchNoteTitles(notes, folders, "plan", &work); ids(hits) != "old" {
+		t.Errorf("plan in work = %s, want the exact folder only (not Homework)", ids(hits))
+	}
+	if hits, ok := matchNoteTitles(notes, folders, "pancakes", nil); len(hits) != 0 || !ok {
+		t.Errorf("miss = %v, resolved %v", ids(hits), ok)
+	}
+	nope := "Nowhere"
+	if _, ok := matchNoteTitles(notes, folders, "plan", &nope); ok {
+		t.Error("an unknown folder resolved; the page must answer it with the folder list")
+	}
+}
+
+func TestChecklistContinuationAndFencesAndTitle(t *testing.T) {
+	html := MarkdownToHTML("- [ ] buy milk\n  and eggs\n")
+	if !strings.Contains(html, "buy milk and eggs\n</span></p>") {
+		t.Fatalf("continuation left its item's span: %s", html)
+	}
+	if strings.Contains(MarkdownToHTML("```\n- [ ] not a checklist\n```\n- a\n  - b\n"), "data-tt") {
+		t.Fatal("a checklist line inside a code fence switched the body to the internal format")
+	}
+	if got := TitleHTML("Plan", "- [ ] x\n"); !strings.Contains(got, "&quot;style&quot;:0}}") || !strings.HasSuffix(got, "Plan\n</span></p>") {
+		t.Fatalf("title ahead of a checklist body = %s", got)
+	}
+	if got := TitleHTML("Plan", "plain"); got != "<h1>Plan</h1>" {
+		t.Fatalf("title ahead of a plain body = %s", got)
 	}
 }

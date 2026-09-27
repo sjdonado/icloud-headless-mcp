@@ -364,3 +364,21 @@ func TestMatchListsPrefersExactName(t *testing.T) {
 		t.Fatalf("empty = %v, want every list", got)
 	}
 }
+
+func TestAllDayDateBothEncodings(t *testing.T) {
+	loc, _ := time.LoadLocation("Europe/Berlin")
+	c := &Client{owner: loc}
+	for _, tc := range []struct {
+		utc  time.Time
+		want string
+	}{
+		{time.Date(2026, 9, 27, 0, 0, 0, 0, time.UTC), "2026-09-27"},   // device: midnight UTC
+		{time.Date(2026, 9, 26, 22, 0, 0, 0, time.UTC), "2026-09-27"},  // web: local midnight
+		{time.Date(2026, 10, 3, 20, 0, 0, 0, time.UTC), "2026-10-03"},  // web: 22:00 local
+		{time.Date(2026, 10, 25, 23, 0, 0, 0, time.UTC), "2026-10-26"}, // web, after the DST change
+	} {
+		if got := c.allDayDate(float64(tc.utc.UnixMilli())); got != tc.want {
+			t.Errorf("allDayDate(%v) = %s, want %s", tc.utc, got, tc.want)
+		}
+	}
+}
