@@ -450,6 +450,19 @@ func (c *Client) alarmTime(dc string) (string, bool) {
 	return config.ISOTime(t, c.owner), true
 }
 
+// allDayDate is the calendar day of an all-day due date. Two encodings
+// are stored (probed 2026-09-27): devices write midnight UTC, and the web
+// app writes a local time in the owner's zone (22:00Z or 20:00Z for a
+// Berlin date, which read as the previous day in UTC). Midnight UTC is
+// read as a UTC date, anything else in the owner's zone.
+func (c *Client) allDayDate(ms float64) string {
+	t := time.UnixMilli(int64(ms)).UTC()
+	if t.Hour() == 0 && t.Minute() == 0 && t.Second() == 0 {
+		return config.ISODate(t)
+	}
+	return config.ISODate(t.In(c.owner))
+}
+
 // ckStamp is a CloudKit millisecond timestamp as ISO 8601 in the owner's
 // zone, or nil.
 func (c *Client) ckStamp(v any) any {
@@ -480,10 +493,9 @@ func (c *Client) reminderRow(r map[string]any, idx ckIndex) map[string]any {
 		}
 	}
 	if dd, _ := r["dd"].(float64); dd != 0 {
-		// An all-day due date is stored as midnight UTC: the day alone.
 		if allday, _ := r["allday"].(bool); allday {
 			row["all_day"] = true
-			row["due"] = config.ISODate(time.UnixMilli(int64(dd)).UTC())
+			row["due"] = c.allDayDate(dd)
 		} else {
 			row["due"] = c.ckStamp(dd)
 		}
@@ -706,10 +718,29 @@ func (c *Client) openList(tab *browser.Tab, listName string) string {
 	if match < 0 {
 		return fmt.Sprintf("no list matching %s; available: %v", listName, names)
 	}
+	// Wait on the app's own selection marker rather than a fixed 4 s, and
+	// skip the click when the list is already the selected one.
+	// Both sides by first line: the menu item's text could carry a count
+	// or a shared-by line under the name.
+	firstLine := func(s string) string { return strings.TrimSpace(strings.SplitN(strings.TrimSpace(s), "\n", 2)[0]) }
+	isSelected := func() bool {
+		sel, _ := evalText(tab, selectedList, nil)
+		return strings.EqualFold(firstLine(sel), firstLine(names[match]))
+	}
+	if isSelected() {
+		return ""
+	}
 	if _, err := tab.Click(readyKind, match); err != nil {
 		return shortError(err)
 	}
-	sleep(4000)
+	for waited := 0; waited < 6000 && !isSelected(); waited += 200 {
+		sleep(200)
+	}
+	if !isSelected() {
+		return fmt.Sprintf("the app did not switch to the list %s", names[match])
+	}
+	// The rows re-render right after the selection flips.
+	sleep(700)
 	return ""
 }
 
@@ -1541,8 +1572,9 @@ func (c *Client) Complete(ctx context.Context, title, listName, id string) (map[
 			}
 		}
 		// A first click can only select the row (headless, Chromium 153).
-		// Click again only once the row has read open twice, 3s apart: a
-		// slow completion clicked a second time would be un-completed.
+		// Poll for the row to leave, and click again only once it has read
+		// open for the whole 6 s window: a slow completion clicked a second
+		// time would be un-completed.
 		var after map[string]map[string]any
 		for click := 0; click < 3; click++ {
 			if click > 0 {
@@ -1553,13 +1585,37 @@ func (c *Client) Complete(ctx context.Context, title, listName, id string) (map[
 			if err := tab.MouseClick(spot.X, spot.Y); err != nil {
 				return nil, err
 			}
-			stillOpen := true
-			for check := 0; check < 2 && stillOpen; check++ {
-				sleep(3000)
+			// Gone means gone on two reads in a row: one read taken
+			// mid re-render can miss a row that is still open, and in
+			// title mode no record check follows.
+			stillOpen, absent := true, 0
+			for waited := 0; waited < 6000 && stillOpen; waited += 300 {
+				sleep(300)
 				if after, err = read(tab); err != nil {
 					return nil, err
 				}
-				_, stillOpen = after[target]
+				if _, open := after[target]; open {
+					absent = 0
+				} else {
+					absent++
+				}
+				stillOpen = absent < 2
+				if d, _ := after[target]["due"].(string); stillOpen && wasDue != "" && d != "" && d != wasDue {
+					break // rolled forward: the loop below reads it as done
+				}
+			}
+			// The window can end on a single missing read: confirm it
+			// before the result below reads that map as a completion.
+			for stillOpen && absent == 1 {
+				sleep(300)
+				if after, err = read(tab); err != nil {
+					return nil, err
+				}
+				if _, open := after[target]; open {
+					absent = 0
+				} else {
+					absent, stillOpen = 2, false
+				}
 			}
 			if !stillOpen {
 				break

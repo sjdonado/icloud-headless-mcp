@@ -1,6 +1,8 @@
 package notes
 
 import (
+	"crypto/rand"
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
@@ -124,6 +126,71 @@ type listFrame struct {
 	virtual bool
 }
 
+// checklistSpan is one checklist item in the editor's own clipboard format,
+// probed 2026-09-26 by copying a real checklist in the web app: a span
+// whose data-tt attribute carries paragraph style 103 and a todo with a
+// 16-byte todoUUID and its done state. The app turns anything else (a
+// data-checked or checkbox list) into a plain bulleted list.
+func checklistSpan(inner string, done bool) string {
+	var id [16]byte
+	_, _ = rand.Read(id[:])
+	var b strings.Builder
+	for i, v := range id {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `"%d":%d`, i, v)
+	}
+	tt := fmt.Sprintf(`{"paragraphStyle":{"style":103,"todo":{"todoUUID":{%s},"done":%t}}}`, b.String(), done)
+	return ttSpan(tt, inner)
+}
+
+// hasChecklist reports a checklist line outside fenced code: the switch to
+// the internal format, which only a real checklist needs.
+func hasChecklist(body string) bool {
+	inCode := false
+	for _, l := range strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(l), "```") {
+			inCode = !inCode
+			continue
+		}
+		if !inCode && mdCheck.MatchString(l) {
+			return true
+		}
+	}
+	return false
+}
+
+// TitleHTML is the title line pasted ahead of a body by a full replace, in
+// the same format as the body: an <h1>, or the editor's title style when
+// the body goes internal, where a bare <h1> would run into the first line.
+func TitleHTML(title, body string) string {
+	if hasChecklist(body) {
+		return ttSpan(`{"paragraphStyle":{"style":0}}`, Escape(title))
+	}
+	return "<h1>" + Escape(title) + "</h1>"
+}
+
+// codeBlock is a fenced block: <pre> as plain HTML, one monospaced
+// paragraph per line in the internal format.
+func codeBlock(code []string, internal bool) string {
+	if !internal {
+		return "<pre>" + Escape(strings.Join(code, "\n")) + "</pre>"
+	}
+	var b strings.Builder
+	for _, l := range code {
+		b.WriteString(ttSpan(`{"paragraphStyle":{"style":4}}`, Escape(l)))
+	}
+	return b.String()
+}
+
+// ttSpan is one paragraph in the editor's internal format. Once a paste
+// carries any data-tt span the editor reads all of it that way, and there
+// a paragraph ends at its own newline, not at the <p>.
+func ttSpan(tt, inner string) string {
+	return `<p><span data-tt="` + strings.ReplaceAll(tt, `"`, "&quot;") + `" style="white-space: pre-wrap;">` + inner + "\n</span></p>"
+}
+
 // MarkdownToHTML converts the deliberately small subset Apple Notes can
 // represent: headings, paragraphs, nested bullet and numbered lists,
 // checklists, block quotes, fenced code, and the inline marks. No tables
@@ -136,6 +203,17 @@ func MarkdownToHTML(body string) string {
 	inCode := false
 	var code []string
 	blankPending := false
+	// A body with a checklist pastes wholly in the editor's internal
+	// format (see ttSpan): the only way it keeps a checklist. Other bodies
+	// keep plain HTML, which carries list nesting the internal format
+	// would need probing for.
+	internal := hasChecklist(body)
+	styled := func(style int, inner string) string {
+		if style < 0 {
+			return ttSpan(`{}`, inner)
+		}
+		return ttSpan(fmt.Sprintf(`{"paragraphStyle":{"style":%d}}`, style), inner)
+	}
 
 	closeLI := func() {
 		if len(stack) > 0 && stack[len(stack)-1].liOpen {
@@ -193,11 +271,15 @@ func MarkdownToHTML(body string) string {
 		} else {
 			closeLI()
 		}
-		attr := ""
-		if checked != "" {
-			attr = ` data-checked="` + checked + `"`
+		switch {
+		case checked != "":
+			inner = checklistSpan(inner, checked == "true")
+		case internal && tag == "ol":
+			inner = styled(102, inner)
+		case internal:
+			inner = styled(100, inner)
 		}
-		html = append(html, "<li"+attr+">"+inner)
+		html = append(html, "<li>"+inner)
 		stack[len(stack)-1].liOpen = true
 	}
 
@@ -205,7 +287,7 @@ func MarkdownToHTML(body string) string {
 		line := strings.TrimRight(raw, " \t")
 		if strings.HasPrefix(strings.TrimSpace(line), "```") {
 			if inCode {
-				html = append(html, "<pre>"+Escape(strings.Join(code, "\n"))+"</pre>")
+				html = append(html, codeBlock(code, internal))
 				code, inCode = nil, false
 			} else {
 				closeLists()
@@ -242,8 +324,15 @@ func MarkdownToHTML(body string) string {
 			blankPending = false
 			continue
 		}
-		// A line indented past the open item continues that item.
+		// A line indented past the open item continues that item. In the
+		// internal format it goes inside the item's span, before its
+		// newline, or the editor reads it as a paragraph of its own.
 		if len(stack) > 0 && stack[len(stack)-1].liOpen && indentWidth(raw) > stack[len(stack)-1].indent {
+			if last := len(html) - 1; internal && strings.HasSuffix(html[last], "\n</span></p>") {
+				html[last] = strings.TrimSuffix(html[last], "\n</span></p>") + " " + inline(strings.TrimSpace(line)) + "\n</span></p>"
+				blankPending = false
+				continue
+			}
 			html = append(html, " "+inline(strings.TrimSpace(line)))
 			blankPending = false
 			continue
@@ -255,17 +344,33 @@ func MarkdownToHTML(body string) string {
 			if level > 3 {
 				level = 3
 			}
+			if internal {
+				style := 1
+				if level > 1 {
+					style = 2
+				}
+				html = append(html, styled(style, inline(m[2])))
+				continue
+			}
 			html = append(html, "<h"+strconv.Itoa(level)+">"+inline(m[2])+"</h"+strconv.Itoa(level)+">")
 			continue
 		}
 		if m := mdQuote.FindStringSubmatch(line); m != nil {
+			if internal {
+				html = append(html, styled(-1, inline(m[1])))
+				continue
+			}
 			html = append(html, "<blockquote>"+inline(m[1])+"</blockquote>")
+			continue
+		}
+		if internal {
+			html = append(html, styled(-1, inline(line)))
 			continue
 		}
 		html = append(html, "<p>"+inline(line)+"</p>")
 	}
 	if inCode && len(code) > 0 {
-		html = append(html, "<pre>"+Escape(strings.Join(code, "\n"))+"</pre>")
+		html = append(html, codeBlock(code, internal))
 	}
 	closeLists()
 	return strings.Join(html, "")

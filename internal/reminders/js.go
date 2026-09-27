@@ -452,14 +452,17 @@ const completeGeoJS = `([title, id]) => {  ` + "%s" + `
 }`
 
 // selectedListJS reads which list the app considers selected, from the
-// selection marker rather than from the rows on screen.
+// list menu's own marker: the div.rm-list-menu-item with aria-selected,
+// whose text is the list name (probed 2026-09-27). Scoped to the menu,
+// because a selected reminder row carries aria-selected too.
 const selectedListJS = `() => {
   ` + "%s" + `
   let selected = '';
   walk(document, 0, (el) => {
     if (selected) return;
-    if (el.getAttribute && el.getAttribute('aria-selected') === 'true') {
-      selected = (el.getAttribute('aria-label') || el.innerText || '').trim();
+    if ((el.className || '').toString().split(/\s+/).includes('rm-list-menu-item')
+        && el.getAttribute('aria-selected') === 'true') {
+      selected = ((el.innerText || '').trim().split('\n')[0] || '').trim();
     }
   });
   return selected;

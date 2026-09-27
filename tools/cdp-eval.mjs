@@ -7,6 +7,8 @@
 //   node tools/cdp-eval.mjs HINT --click X Y     trusted click (hover, press buttons=1, release)
 //   node tools/cdp-eval.mjs HINT --type TEXT     Input.insertText into the focused element
 //   node tools/cdp-eval.mjs HINT --key KEY       Tab, Enter or Escape
+//   node tools/cdp-eval.mjs HINT --combo KEY     Control+KEY (a, c, v, z)
+//   node tools/cdp-eval.mjs HINT --grant 'EXPR'  grant clipboard access, then evaluate EXPR
 //
 // HINT picks the tab by URL (reminders, notes). EXPR may use $$all(sel,
 // root) (querySelectorAll through shadow roots), box(el) and desc(el).
@@ -33,6 +35,22 @@ if (rest[0] === '--click') {
   console.log('clicked', x, y); process.exit(0);
 }
 if (rest[0] === '--type') { await call('Input.insertText', { text: rest.slice(1).join(' ') }); console.log('typed'); process.exit(0); }
+if (rest[0] === '--grant') {
+  // Clipboard read for the page, so EXPR can await navigator.clipboard.read();
+  // both permissions, as the server grants them (AGENTS.md, clipboard facts).
+  const r = await call('Browser.grantPermissions', { origin: 'https://www.icloud.com',
+    permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'] });
+  if (r.error) { console.log('grant refused: ' + r.error.message); process.exit(1); }
+  // A grant lasts only as long as this connection: evaluate EXPR on it.
+  rest.shift(); }
+if (rest[0] === '--combo') { const k = rest[1]; const up = k.toUpperCase(); const vk = up.charCodeAt(0);
+  // Control+key, the shape the server's KeyCombo sends: select all, copy, paste, undo.
+  for (const p of [{ type: 'keyDown', key: 'Control', code: 'ControlLeft', windowsVirtualKeyCode: 17 },
+                   { type: 'keyDown', key: k, code: 'Key' + up, windowsVirtualKeyCode: vk, modifiers: 2 },
+                   { type: 'keyUp', key: k, code: 'Key' + up, windowsVirtualKeyCode: vk, modifiers: 2 },
+                   { type: 'keyUp', key: 'Control', code: 'ControlLeft', windowsVirtualKeyCode: 17 }])
+    await call('Input.dispatchKeyEvent', p);
+  console.log('combo Control+' + k); process.exit(0); }
 if (rest[0] === '--key') { const k = rest[1]; const codes = { Tab: 9, Enter: 13, Escape: 27 };
   for (const type of ['keyDown', 'keyUp']) await call('Input.dispatchKeyEvent', { type, key: k, code: k, windowsVirtualKeyCode: codes[k] || 0, ...(k === 'Enter' && type === 'keyDown' ? { text: '\r' } : {}) });
   console.log('key', k); process.exit(0); }
