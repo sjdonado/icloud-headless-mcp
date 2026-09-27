@@ -229,3 +229,105 @@ func TestEmptyRootSucceedsQuiet(t *testing.T) {
 		t.Fatalf("empty root should import zero files, got %+v", res)
 	}
 }
+
+// A sample line for the steps metric with a given uuid and value, shaped
+// like the fixtures above.
+func stepSample(uuid string, value int) string {
+	return `{"uuid":"` + uuid + `","metric":"steps","recordType":"x","start":"2026-09-09T08:00:00+02:00","end":"2026-09-09T08:01:00+02:00","localDate":"2026-09-09","timezone":"Europe/Amsterdam","value":` + itoa(value) + `,"unit":"count","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-09T08:02:00+02:00","schemaVersion":1}` + "\n"
+}
+
+// The tombstone line exactly as the app writes it (brief, 2026-09-27).
+func tombLine(uuid string) string {
+	return `{"recordType":"tombstone","recordedAt":"2026-09-25T10:08:04.595Z","schemaVersion":1,"uuid":"` + uuid + `"}` + "\n"
+}
+
+func TestTombstoneMonthDeletesStoredSampleIdempotently(t *testing.T) {
+	db, _ := testDB(t)
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "steps", "2026-09.jsonl"), stepSample("DE7CEE4A-C7B2-4329-8590-153E22134F00", 120))
+	if _, err := ImportDir(db, root, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(root, "_tombstones", "2026-09.jsonl"), tombLine("DE7CEE4A-C7B2-4329-8590-153E22134F00"))
+	for pass := 0; pass < 2; pass++ { // a second import of the same files changes nothing
+		if _, err := ImportDir(db, root, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		if got := count(t, db, `SELECT COUNT(*) FROM samples`); got != 0 {
+			t.Fatalf("pass %d: the tombstoned sample survived (%d rows)", pass, got)
+		}
+		if got := count(t, db, `SELECT COUNT(*) FROM tombstones WHERE applied=1`); got != 1 {
+			t.Fatalf("pass %d: tombstone rows = %d, want one, applied", pass, got)
+		}
+	}
+}
+
+// The 2026-09-25 burst looks like delete-and-re-export: tombstones for the
+// old uuids plus the same samples under new ones. Importing both must
+// leave one copy, never two.
+func TestReExportWithNewUUIDsDoesNotDoubleCount(t *testing.T) {
+	db, _ := testDB(t)
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "steps", "2026-09.jsonl"), stepSample("old-1", 50)+stepSample("old-2", 70))
+	if _, err := ImportDir(db, root, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(root, "steps", "2026-09.jsonl"), stepSample("new-1", 50)+stepSample("new-2", 70))
+	writeFile(t, filepath.Join(root, "_tombstones", "2026-09.jsonl"), tombLine("old-1")+tombLine("old-2"))
+	if _, err := ImportDir(db, root, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if got := count(t, db, `SELECT COUNT(*) FROM samples`); got != 2 {
+		t.Fatalf("rows after re-export = %d, want the 2 new samples only", got)
+	}
+	if got := count(t, db, `SELECT CAST(SUM(value_num) AS INTEGER) FROM samples`); got != 120 {
+		t.Fatalf("summed steps = %d, want 120, not doubled", got)
+	}
+}
+
+// The sync empties staged files after each run and leaves the metric
+// directories; the next import with nothing new is quiet, not a layout
+// error (2026-09-25: "holds active_energy, heart_rate, ... but no ...").
+func TestEmptiedStagingSucceedsQuiet(t *testing.T) {
+	db, _ := testDB(t)
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "steps", "2026-09.jsonl"), stepSample("s-1", 10))
+	writeFile(t, filepath.Join(root, "_tombstones", "2026-09.jsonl"), tombLine("gone-1"))
+	if _, err := ImportDir(db, root, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"steps/2026-09.jsonl", "_tombstones/2026-09.jsonl"} {
+		if err := os.Remove(filepath.Join(root, f)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile(t, filepath.Join(root, "steps", ".DS_Store"), "x") // a stray file must not make it look full
+	if res, err := ImportDir(db, root, time.Now()); err != nil || len(res) != 0 {
+		t.Fatalf("emptied staging = %v, %v; want a quiet no-op", res, err)
+	}
+}
+
+// Next day: the sync emptied steps/, nothing new was fetched for it, and
+// only a tombstone file arrived. The deletion must apply, not fail on the
+// empty metric directory.
+func TestTombstoneAppliesBesideEmptiedMetricDir(t *testing.T) {
+	db, _ := testDB(t)
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "steps", "2026-09.jsonl"), stepSample("keep-1", 10)+stepSample("drop-1", 20))
+	if _, err := ImportDir(db, root, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, "steps", "2026-09.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(root, "_tombstones", "2026-09.jsonl"), tombLine("drop-1"))
+	if _, err := ImportDir(db, root, time.Now()); err != nil {
+		t.Fatalf("a tombstone beside an emptied metric dir should import: %v", err)
+	}
+	if got := count(t, db, `SELECT COUNT(*) FROM samples WHERE uuid='drop-1'`); got != 0 {
+		t.Fatal("the tombstone was not applied")
+	}
+	if got := count(t, db, `SELECT COUNT(*) FROM samples WHERE uuid='keep-1'`); got != 1 {
+		t.Fatal("an untombstoned sample went missing")
+	}
+}

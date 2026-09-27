@@ -6,6 +6,10 @@ Technical internals for `icloud-headless-mcp`: process and lock model, directory
 
 Notes and Reminders each hold their own per-app lock, because there is one browser and two calls must not drive it at once. DAV and IMAP take no lock at all. So a Notes call holding the browser does not serialise a mail read behind it, and that is the property worth re-testing after any change here: call `list_mail` while a Notes call holds its lock.
 
+## Where the time goes
+
+Reads that the web apps keep as CloudKit records (the Notes list, a note by id or title, Reminders) are served from those records in about a second, with no clicks. Flows that drive the page (searching notes, writes) spend most of their time waiting for it. Selecting a Notes folder, opening a reminder list and confirming a completion wait on the page's own markers; the other steps in `create_note`, `update_note` and `create_reminder` still use fixed sleeps. Measured numbers, the causes, and the next options are in [`PERFORMANCE.md`](PERFORMANCE.md).
+
 ## The layout
 
 | Path | What it is |
@@ -68,7 +72,7 @@ It is one process, `icloud-mcp door HOST:PORT TTL PASSFILE`, started by `open_lo
 
 Scheduling it is yours. Nothing in this repository runs it for you: point a systemd timer or a cron entry at it, once a day being a common choice, and `drive_status` will tell a client whether that schedule is actually keeping up.
 
-Which folders are pulled is configuration, not code: `DRIVE_LIBRARIES` is a JSON array of `{name, kind, dest}` entries. Use `folder` for any app export folder: every file beneath it is fetched and its relative layout is preserved under `dest`. `tree` is the narrower monthly-export layout, and `snapshot` is one file rewritten whole. An empty or unparseable value pulls nothing and says so rather than guessing at names. `internal/dvlibraries` documents the entry shape.
+Which folders are pulled is configuration, not code: `DRIVE_LIBRARIES` is a JSON array of `{name, kind, dest}` entries. A library is either a folder at the CloudDocs root or an app's own container (zone `iCloud.<bundle id>`), which the root listing does not hold: the fetch lists both, the root through `retrieveItemDetailsInFolders` and the containers through `retrieveAppLibraries`. An entry with `container` (the bundle id or zone) matches that container whatever its display name, so an app rename does not silently stop the pull; without it the display name matches case-insensitively. When a library is missing, the fetch prints what both listings held, with zones, on stderr; the exit code keeps its meaning (0 when anything was fetched or unchanged), because the scheduler gates the import on it. A `tree` library pulls every month whose etag changed; `months` caps sample months at the newest N, and `_tombstones` months are never capped, because a dropped deletion leaves a stale sample and a delete-and-re-export burst needs every re-exported month. Use `folder` for any app export folder: every file beneath it is fetched and its relative layout is preserved under `dest`. `tree` is the narrower monthly-export layout, and `snapshot` is one file rewritten whole. An empty or unparseable value pulls nothing and says so rather than guessing at names. `internal/dvlibraries` documents the entry shape.
 
 What happens to a staged file afterwards is outside this server. It fetches, it stages, and it reports; it never reads a staged file back and it never hands one on. If something else on the host imports what is staged, run that as a different account, so the account holding the browser session cannot reach whatever it feeds.
 

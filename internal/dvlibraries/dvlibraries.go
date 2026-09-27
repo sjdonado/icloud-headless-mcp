@@ -1,10 +1,14 @@
 // Package dvlibraries is which iCloud Drive libraries this install pulls,
 // and where their files land.
 //
-// An "app library" is a folder at the Drive root that some app on the
-// owner's phone writes into. Which ones exist is a fact about that phone,
-// not about this server, so the list is configuration: DRIVE_LIBRARIES in
-// this service's env file, a JSON array of entries.
+// An "app library" is the iCloud container some app on the owner's phone
+// writes into: an ordinary folder at the Drive root, or an app container
+// (zone iCloud.<bundle id>) that Drive lists among its app libraries. Which
+// ones exist is a fact about that phone, not about this server, so the list
+// is configuration: DRIVE_LIBRARIES in this service's env file, a JSON
+// array of entries. An entry names its library by display name and,
+// optionally, by container (bundle id or zone), which survives the app
+// being renamed.
 package dvlibraries
 
 import (
@@ -17,6 +21,7 @@ import (
 // Library is one configured Drive library.
 type Library struct {
 	Name      string
+	Container string // bundle id or zone, e.g. com.mlyz.HealthBridge; matches whatever the display name
 	Kind      string // tree, snapshot, or folder
 	Dest      string
 	Subfolder string
@@ -146,6 +151,7 @@ func ParseLibraries(raw string) []Library {
 		}
 		lib := Library{Name: name, Kind: kind, Dest: dest, As: as}
 		lib.Subfolder, _ = e["subfolder"].(string)
+		lib.Container, _ = e["container"].(string)
 		lib.File, _ = e["file"].(string)
 		if months, ok := e["months"].(float64); ok {
 			lib.Months = int(months)

@@ -390,7 +390,7 @@ A running install holds a signed-in Apple session, so the design keeps that sess
 
 ## How it works
 
-One process serves all 32 tools. Calendar and contacts go over CalDAV and CardDAV, mail over IMAP, all with the app-specific password. Notes and Reminders drive the iCloud web apps through the resident headless Chrome over the DevTools protocol, each app behind its own lock, so a slow Notes call never holds up a mail read. The resident holds the session in its profile; restarting it keeps you signed in. Details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+One process serves all 32 tools. Calendar and contacts go over CalDAV and CardDAV, mail over IMAP, all with the app-specific password. Notes and Reminders drive the iCloud web apps through the resident headless Chrome over the DevTools protocol, each app behind its own lock, so a slow Notes call never holds up a mail read. The resident holds the session in its profile; restarting it keeps you signed in. Details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). How long each tool takes, and why: [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
 
 Things worth knowing:
 
@@ -408,7 +408,7 @@ Things worth knowing:
 | `AGENT_TZ`               | the host's zone          | your IANA zone; required only when the host runs UTC                                                 |
 | `AGENT_DEFAULT_CALENDAR` | the first calendar       | where an event goes when the caller names none. Set it: the first calendar is often a shared one     |
 | `ICLOUD_STATE`           | `~/.icloud-mcp`          | the browser profile, cookie jar, locks and every other state path                                    |
-| `DRIVE_LIBRARIES`        | none                     | iCloud Drive app folders to pull, as JSON                                                            |
+| `DRIVE_LIBRARIES`        | none                     | iCloud Drive libraries to pull, as JSON: root folders or app containers, by `name` or by `container` (bundle id or zone, survives a rename) |
 
 [`.env.example`](.env.example) lists the rest, which only multi-account server installs need.
 

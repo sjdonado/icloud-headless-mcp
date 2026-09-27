@@ -179,6 +179,10 @@ func ImportDir(db *sql.DB, root string, now time.Time) ([]FileResult, error) {
 	}
 	var top []string
 	var loose []string
+	// held counts what each top directory holds at all: the sync empties
+	// staged files after a run and leaves the directories, which is
+	// "nothing staged", not a wrong layout.
+	held := 0
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil, err
@@ -196,6 +200,15 @@ func ImportDir(db *sql.DB, root string, now time.Time) ([]FileResult, error) {
 			return nil, err
 		}
 		tomb := e.Name() == "_tombstones"
+		if !tomb {
+			// Only what the import would read or reject: a stray
+			// .DS_Store must not make an emptied directory look full.
+			for _, m := range month {
+				if m.IsDir() || strings.HasSuffix(m.Name(), ".jsonl") {
+					held++
+				}
+			}
+		}
 		metric := ""
 		if !tomb {
 			metric = e.Name()
@@ -210,20 +223,32 @@ func ImportDir(db *sql.DB, root string, now time.Time) ([]FileResult, error) {
 			}{filepath.Join(root, e.Name(), m.Name()), metric, tomb})
 		}
 	}
-	// Loud mismatch, never a silent success: directories exist but zero
-	// sample files were read, so this root is some other shape (a raw/
-	// level, a bare folder, a typo'd path). Reporting "0 new" here once
-	// applied deletions while ingesting nothing, so this fails and names
-	// what it found. Two quiet cases: an empty root (nothing staged yet),
-	// and a tombstones-only root, which is the legitimate early-arrival
-	// staging the tombstone spec scenario requires.
+	// Loud mismatch, never a silent success: directories hold something
+	// but zero sample files were read, so this root is some other shape
+	// (a raw/ level, a bare folder, a typo'd path). Reporting "0 new" here
+	// once applied deletions while ingesting nothing, so this fails and
+	// names what it found. Three quiet cases: an empty root (nothing
+	// staged yet), empty directories this store has imported as metrics
+	// before (the sync emptied them after the last run; an unknown empty
+	// directory is still a wrong path), and a tombstones-only root, which
+	// is the legitimate early-arrival staging the tombstone spec scenario
+	// requires.
+	emptied := false
+	if held == 0 && len(loose) == 0 && len(top) > 0 {
+		var err error
+		if emptied, err = allImportedBefore(db, top); err != nil {
+			return nil, err
+		}
+	}
 	samples := 0
 	for _, f := range files {
 		if !f.tomb {
 			samples++
 		}
 	}
-	if samples == 0 && len(top) > 0 && !(len(top) == 1 && top[0] == "_tombstones") {
+	// Emptied metric directories skip the check but still import any
+	// tombstone files: a deletion must not wait for the next sample.
+	if samples == 0 && len(top) > 0 && !emptied && !(len(top) == 1 && top[0] == "_tombstones") {
 		known := []string{}
 		for _, name := range top {
 			if name != "_tombstones" {
@@ -265,6 +290,24 @@ func ImportDir(db *sql.DB, root string, now time.Time) ([]FileResult, error) {
 		out = append(out, FileResult{File: rel, Metric: f.metric, Seen: seen, New: fresh, Updated: refreshed})
 	}
 	return out, nil
+}
+
+// allImportedBefore reports whether every named directory is _tombstones or
+// a metric the imports ledger has seen, so an empty one is emptied staging.
+func allImportedBefore(db *sql.DB, dirs []string) (bool, error) {
+	for _, d := range dirs {
+		if d == "_tombstones" {
+			continue
+		}
+		var seen bool
+		if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM imports WHERE metric = ?)`, d).Scan(&seen); err != nil {
+			return false, err
+		}
+		if !seen {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func importFile(db storer, path, metric string, tombstones bool) (seen, fresh, refreshed int, err error) {

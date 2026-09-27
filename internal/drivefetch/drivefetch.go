@@ -61,6 +61,18 @@ func (a *API) post(url, q string, body any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	return a.do(req, url)
+}
+
+func (a *API) get(url, q string) (any, error) {
+	req, err := http.NewRequest("GET", url+"?"+q, nil)
+	if err != nil {
+		return nil, err
+	}
+	return a.do(req, url)
+}
+
+func (a *API) do(req *http.Request, url string) (any, error) {
 	req.Header.Set("Origin", "https://www.icloud.com")
 	req.Header.Set("Referer", "https://www.icloud.com/")
 	req.Header.Set("Content-Type", "text/plain")
@@ -112,23 +124,58 @@ func (a *API) Items(drivewsid string) ([]map[string]any, error) {
 	return items, nil
 }
 
-// Child finds one entry by name.
+// AppLibraries lists Drive's app libraries: the containers apps write into
+// (zone iCloud.<bundle id>), which the CloudDocs root listing does not
+// hold.
+func (a *API) AppLibraries() ([]map[string]any, error) {
+	out, err := a.get(a.DriveBase+"/retrieveAppLibraries", a.DriveQ)
+	if err != nil {
+		return nil, err
+	}
+	// The items key must be there (an empty list is fine): a 200 carrying
+	// an error body must not read as "no app libraries".
+	env, ok := out.(map[string]any)
+	raw, ok2 := env["items"].([]any)
+	if !ok || !ok2 {
+		b, _ := json.Marshal(out)
+		return nil, fmt.Errorf("unexpected app library response envelope: %s", truncate(string(b), 200))
+	}
+	var items []map[string]any
+	for _, item := range raw {
+		if m, ok := item.(map[string]any); ok {
+			items = append(items, m)
+		}
+	}
+	return items, nil
+}
+
+// Child finds one entry by name: an exact match, else the one entry that
+// matches ignoring case (libraries match the same way).
 func (a *API) Child(drivewsid, name string) (map[string]any, error) {
 	items, err := a.Items(drivewsid)
 	if err != nil {
 		return nil, err
 	}
+	var folded []map[string]any
 	for _, item := range items {
 		if item["name"] == name {
 			return item, nil
 		}
+		if strings.EqualFold(strOf(item["name"]), name) {
+			folded = append(folded, item)
+		}
+	}
+	if len(folded) == 1 {
+		return folded[0], nil
 	}
 	return nil, nil
 }
 
 // Download turns a file's docwsid into bytes via a signed URL.
 func (a *API) Download(item map[string]any) ([]byte, error) {
-	zone, _ := item["zone"].(string)
+	// The item's own zone, from its zone field or its drivewsid: an app
+	// container's files download through that container's zone.
+	zone := zoneOf(item)
 	if zone == "" {
 		zone = "com.apple.CloudDocs"
 	}
@@ -223,6 +270,13 @@ func Run(api *API, etags map[string]any, staging string, libs []dvlibraries.Libr
 		fmt.Fprintf(errout, "drive root listing failed: %v\n", err)
 		return 1
 	}
+	// App containers are not in the root listing. A failed app-library
+	// listing still lets root libraries through, and says so.
+	apps, appsErr := api.AppLibraries()
+	if appsErr != nil {
+		fmt.Fprintf(errout, "drive app library listing failed: %v\n", appsErr)
+	}
+	missing := false
 	pull := func(item map[string]any, rel string) {
 		key, _ := item["docwsid"].(string)
 		if etag, _ := item["etag"].(string); key != "" && etag != "" {
@@ -256,14 +310,22 @@ func Run(api *API, etags map[string]any, staging string, libs []dvlibraries.Libr
 		fmt.Fprintf(out, "  %s: %d bytes, modified %v\n", rel, len(data), item["dateModified"])
 	}
 	for _, lib := range libs {
-		var found map[string]any
-		for _, item := range root {
-			if item["name"] == lib.Name {
-				found = item
+		found, why := findLibrary(lib, root, apps)
+		if found == nil && lib.Container != "" {
+			// A container the app did not make public is in neither
+			// listing, but its documents folder can still be listed by id.
+			zone := containerZone(lib.Container)
+			if items, err := api.Items("FOLDER::" + zone + "::documents"); err == nil && items != nil {
+				found = map[string]any{"name": lib.Name, "type": "APP_LIBRARY", "zone": zone, "drivewsid": "FOLDER::" + zone + "::documents"}
+			} else if err != nil {
+				why += fmt.Sprintf("; listing its documents folder by id failed: %v", err)
+			} else {
+				why += "; its documents folder listed by id is empty or absent"
 			}
 		}
 		if found == nil {
-			fmt.Fprintf(errout, "%s not found at the Drive root\n", lib.Name)
+			fmt.Fprintf(errout, "%s %s\n", describe(lib), why)
+			missing = true
 			failed++
 			continue
 		}
@@ -280,7 +342,20 @@ func Run(api *API, etags map[string]any, staging string, libs []dvlibraries.Libr
 				continue
 			}
 			if f == nil {
-				fmt.Fprintf(errout, "%s/%s not found\n", lib.Name, name)
+				// Say what the library does hold, as for a missing library.
+				held := "(nothing)"
+				if items, err := api.Items(strOf(found["drivewsid"])); err == nil && len(items) > 0 {
+					var names []string
+					for _, item := range items {
+						n := strOf(item["name"])
+						if ext := strOf(item["extension"]); ext != "" {
+							n += "." + ext
+						}
+						names = append(names, fmt.Sprintf("%q %s", n, strOf(item["type"])))
+					}
+					held = strings.Join(names, "; ")
+				}
+				fmt.Fprintf(errout, "%s/%s not found; %s holds: %s\n", lib.Name, name, lib.Name, held)
 				failed++
 				continue
 			}
@@ -341,7 +416,16 @@ func Run(api *API, etags map[string]any, staging string, libs []dvlibraries.Libr
 				}
 				base = sub
 			}
-			months := Months(lib.Months, today)
+			// With months set, sample files are limited to the newest N;
+			// without it every month is considered and the etag skip keeps
+			// unchanged ones free. Tombstone months are never limited: a
+			// deletion dropped by the window leaves a stale sample, and a
+			// delete-and-re-export burst deletes history whose new copies
+			// only an unlimited pull brings back.
+			var months []string
+			if lib.Months > 0 {
+				months = Months(lib.Months, today)
+			}
 			metrics, err := api.Items(strOf(base["drivewsid"]))
 			if err != nil {
 				fmt.Fprintf(errout, "%s: %v\n", lib.Name, err)
@@ -358,28 +442,167 @@ func Run(api *API, etags map[string]any, staging string, libs []dvlibraries.Libr
 					failed++
 					break
 				}
-				for _, month := range months {
-					for _, f := range files {
-						if f["name"] != month {
-							continue
-						}
-						rel, serr := dvlibraries.StagingPath(lib.Dest, strOf(metric["name"]), month+".jsonl")
-						if serr != nil {
-							fmt.Fprintf(errout, "%s: %v\n", lib.Name, serr)
-							failed++
-							continue
-						}
-						pull(f, rel)
+				limit := months
+				if strOf(metric["name"]) == "_tombstones" {
+					limit = nil
+				}
+				for _, f := range files {
+					month := strOf(f["name"])
+					if f["type"] == "FOLDER" || !monthRe.MatchString(month) || (limit != nil && !contains(limit, month)) {
+						continue
 					}
+					rel, serr := dvlibraries.StagingPath(lib.Dest, strOf(metric["name"]), month+".jsonl")
+					if serr != nil {
+						fmt.Fprintf(errout, "%s: %v\n", lib.Name, serr)
+						failed++
+						continue
+					}
+					pull(f, rel)
 				}
 			}
 		}
 	}
+	if missing {
+		// Once, after every library: what Drive did hold, so the miss
+		// explains itself.
+		fmt.Fprint(errout, listing(root, apps, appsErr))
+	}
 	fmt.Fprintf(out, "fetched %d, unchanged %d, failed %d, into %s\n", fetched, skipped, failed, staging)
+	// Exit codes keep their meaning (0 something fetched or unchanged, 1
+	// nothing): the scheduler outside this repo gates the import on them,
+	// and a standing miss exiting 1 would stop every import. Misses are
+	// loud on stderr instead.
 	if fetched > 0 || skipped > 0 {
 		return 0
 	}
 	return 1
+}
+
+// monthRe is a monthly file's name as Drive lists it: the extension is a
+// separate field, so the name is the bare YYYY-MM.
+var monthRe = regexp.MustCompile(`^\d{4}-\d{2}$`)
+
+func contains(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+// zoneOf is an entry's zone: its zone field, else the middle part of a
+// drivewsid shaped FOLDER::<zone>::<id>.
+func zoneOf(item map[string]any) string {
+	if z := strOf(item["zone"]); z != "" {
+		return z
+	}
+	if parts := strings.Split(strOf(item["drivewsid"]), "::"); len(parts) == 3 {
+		return parts[1]
+	}
+	return ""
+}
+
+// containerKey folds a bundle id or zone to one form: iCloud.com.x.App and
+// com.x.App name the same container.
+func containerKey(s string) string {
+	// The Mac's folder name spells the zone with tildes:
+	// iCloud~com~mlyz~HealthBridge is iCloud.com.mlyz.HealthBridge.
+	s = strings.ReplaceAll(strings.ToLower(strings.TrimSpace(s)), "~", ".")
+	return strings.TrimPrefix(s, "icloud.")
+}
+
+// containerZone is the zone a configured container names, in its own
+// spelling: Drive's zone names are case-sensitive, so containerKey's
+// lowercase form is for comparing only.
+func containerZone(s string) string {
+	s = strings.ReplaceAll(strings.TrimSpace(s), "~", ".")
+	if !strings.HasPrefix(strings.ToLower(s), "icloud.") {
+		s = "iCloud." + s
+	}
+	return s
+}
+
+// findLibrary picks the entry a configured library names. A container
+// (bundle id or zone) wins over the display name, because an app rename
+// changes the name and keeps the container; without one the display name
+// matches case-insensitively. App libraries are searched with the root.
+func findLibrary(lib dvlibraries.Library, root, apps []map[string]any) (map[string]any, string) {
+	// One entry per drivewsid: an app library the root also lists (live:
+	// "Zen - Habits" is in both) is one library, not two.
+	var all []map[string]any
+	seen := map[string]bool{}
+	for _, item := range append(append([]map[string]any{}, root...), apps...) {
+		id := strOf(item["drivewsid"])
+		if id != "" && seen[id] {
+			continue
+		}
+		seen[id] = true
+		all = append(all, item)
+	}
+	if lib.Container != "" {
+		want := containerKey(lib.Container)
+		for _, item := range all {
+			if z := zoneOf(item); z != "" && containerKey(z) == want && containerKey(z) != "com.apple.clouddocs" {
+				return item, ""
+			}
+		}
+		return nil, "not found: no app library has that container"
+	}
+	// An exact name wins; otherwise one case-insensitive match. Two
+	// entries that both fit (a root folder and an app library sharing a
+	// name) is ambiguous: say so rather than pull the wrong one.
+	var exact, folded []map[string]any
+	for _, item := range all {
+		name := strings.TrimSpace(strOf(item["name"]))
+		if name == strings.TrimSpace(lib.Name) {
+			exact = append(exact, item)
+		} else if strings.EqualFold(name, strings.TrimSpace(lib.Name)) {
+			folded = append(folded, item)
+		}
+	}
+	switch {
+	case len(exact) == 1:
+		return exact[0], ""
+	case len(exact) > 1:
+		return nil, "is ambiguous: several Drive entries have that name; add \"container\" to pick one"
+	case len(folded) == 1:
+		return folded[0], ""
+	case len(folded) > 1:
+		return nil, "is ambiguous: several Drive entries match that name ignoring case; add \"container\""
+	}
+	return nil, "not found at the Drive root or among the app libraries"
+}
+
+func describe(lib dvlibraries.Library) string {
+	if lib.Container != "" {
+		return fmt.Sprintf("%s (container %s)", lib.Name, lib.Container)
+	}
+	return lib.Name
+}
+
+// listing says what Drive did hold, so a missing library explains itself:
+// names and types at the root, names and zones among the app libraries.
+func listing(root, apps []map[string]any, appsErr error) string {
+	line := func(items []map[string]any, zone bool) string {
+		if len(items) == 0 {
+			return "(none)"
+		}
+		var parts []string
+		for _, item := range items {
+			p := fmt.Sprintf("%q %s", strOf(item["name"]), strOf(item["type"]))
+			if zone {
+				p += " " + zoneOf(item)
+			}
+			parts = append(parts, strings.TrimSpace(p))
+		}
+		return strings.Join(parts, "; ")
+	}
+	appLine := line(apps, true)
+	if appsErr != nil {
+		appLine = "unavailable: " + appsErr.Error()
+	}
+	return "  the Drive root holds: " + line(root, false) + "\n  the app libraries are: " + appLine + "\n"
 }
 
 func strOf(v any) string {
