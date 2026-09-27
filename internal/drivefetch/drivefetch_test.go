@@ -431,3 +431,38 @@ func TestSameEntryInBothListingsIsOneLibrary(t *testing.T) {
 		t.Fatalf("found nothing: %s", why)
 	}
 }
+
+// Live 2026-09-27: "Zen - Habits" holds "@container" and a file Drive lists
+// as name "zen-habits", extension "jsonl". It stages as zen-habits.jsonl,
+// whether the entry names the file with or without its extension.
+func TestFilesStageWithTheirExtension(t *testing.T) {
+	f, api := newFakeDrive(t)
+	const zone = "iCloud.com.zenhabit.app"
+	f.apps = []map[string]any{{"name": "Zen - Habits", "type": "APP_LIBRARY", "zone": zone, "drivewsid": "FOLDER::" + zone + "::documents"}}
+	f.folders["FOLDER::"+zone+"::documents"] = []map[string]any{
+		{"name": "@container", "type": "FOLDER", "zone": zone, "drivewsid": "FOLDER::" + zone + "::c"},
+		{"name": "zen-habits", "extension": "jsonl", "type": "FILE", "zone": zone, "docwsid": "doc-zen", "etag": "z1"},
+	}
+	f.folders["FOLDER::"+zone+"::c"] = []map[string]any{}
+	f.files["doc-zen"] = []byte("{}\n")
+	for _, file := range []string{"zen-habits", "zen-habits.jsonl"} {
+		staging := t.TempDir()
+		var out, errout strings.Builder
+		libs := []dvlibraries.Library{{Name: "Zen - Habits", Container: zone, Kind: "snapshot", File: file, Dest: "zen"}}
+		if code := Run(api, map[string]any{}, staging, libs, &out, &errout, time.Now()); code != 0 {
+			t.Fatalf("file %q: exit %d: %s", file, code, errout.String())
+		}
+		if _, err := os.Stat(filepath.Join(staging, "zen/zen-habits.jsonl")); err != nil {
+			t.Errorf("file %q did not stage as zen/zen-habits.jsonl: %v", file, err)
+		}
+	}
+	staging := t.TempDir()
+	var out, errout strings.Builder
+	libs := []dvlibraries.Library{{Name: "Zen - Habits", Container: zone, Kind: "folder", Dest: "zen"}}
+	if code := Run(api, map[string]any{}, staging, libs, &out, &errout, time.Now()); code != 0 {
+		t.Fatalf("folder walk: exit %d: %s", code, errout.String())
+	}
+	if _, err := os.Stat(filepath.Join(staging, "zen/zen-habits.jsonl")); err != nil {
+		t.Errorf("the folder walk dropped the extension: %v", err)
+	}
+}

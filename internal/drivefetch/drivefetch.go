@@ -156,12 +156,14 @@ func (a *API) Child(drivewsid, name string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Drive keeps a file's extension out of its name, so a configured
+	// "zen-habits" and "zen-habits.jsonl" both name zen-habits + jsonl.
 	var folded []map[string]any
 	for _, item := range items {
-		if item["name"] == name {
+		if strOf(item["name"]) == name || fileName(item) == name {
 			return item, nil
 		}
-		if strings.EqualFold(strOf(item["name"]), name) {
+		if strings.EqualFold(strOf(item["name"]), name) || strings.EqualFold(fileName(item), name) {
 			folded = append(folded, item)
 		}
 	}
@@ -362,7 +364,7 @@ func Run(api *API, etags map[string]any, staging string, libs []dvlibraries.Libr
 			dest := lib.As
 			if dest == "" {
 				var serr error
-				dest, serr = dvlibraries.StagingPath(lib.Dest, name)
+				dest, serr = dvlibraries.StagingPath(lib.Dest, fileName(f))
 				if serr != nil {
 					fmt.Fprintf(errout, "%s: %v\n", lib.Name, serr)
 					failed++
@@ -380,7 +382,7 @@ func Run(api *API, etags map[string]any, staging string, libs []dvlibraries.Libr
 					return err
 				}
 				for _, item := range items {
-					name, _ := item["name"].(string)
+					name := fileName(item)
 					childPath, serr := dvlibraries.StagingPath(prefix, name)
 					if serr != nil {
 						return serr
@@ -489,6 +491,17 @@ func contains(list []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// fileName is a Drive file's full name: the listing keeps the extension
+// in its own field (live: name "zen-habits", extension "jsonl"), and a
+// name without it would stage zen-habits and let a.csv and a.txt collide.
+func fileName(item map[string]any) string {
+	name := strOf(item["name"])
+	if ext := strOf(item["extension"]); ext != "" && item["type"] != "FOLDER" && !strings.HasSuffix(name, "."+ext) {
+		return name + "." + ext
+	}
+	return name
 }
 
 // zoneOf is an entry's zone: its zone field, else the middle part of a
