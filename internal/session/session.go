@@ -32,12 +32,13 @@ func Reask(cfg *config.Config) (string, int) {
 	if _, err := cdp.DebuggerURL(); err != nil {
 		return fmt.Sprintf("could not reach the browser: %v", err), 2
 	}
+	// The reaper closes tabs idle past 15 minutes; a re-asked tab counts
+	// as just used, like every other entry point promises. Before the
+	// navigation, so a reaper pass cannot close a tab this opens mid-load.
+	state.Touch("reminders")
 	if err := browser.Renavigate(cdp, remindersURL, zone); err != nil {
 		return fmt.Sprintf("%s: %v", remindersURL, err), 1
 	}
-	// The reaper closes tabs idle past 15 minutes; a re-asked tab counts
-	// as just used, like every other entry point promises.
-	state.Touch("reminders")
 	// Release the latch so the next real call can find out whether the
 	// owner approved. A re-ask is the owner saying they are at a device.
 	state.ClearBlocked()

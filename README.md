@@ -315,7 +315,7 @@ Every open reminder across every list, read from Apple's own records rather than
 }
 ```
 
-`recurring` says the reminder repeats, and `tag_count` says it has tags. The repeat rule, tag names, URLs and subtasks are not decoded yet, so they are left out rather than guessed. When the records do not answer, the tool falls back to the rendered list with `source: "page"`, needs a `list_name`, and says which fields it could not read.
+`recurring` says the reminder repeats, and `tag_count` says it has tags. The repeat rule, tag names, URLs and subtasks are not decoded yet, so they are left out rather than guessed. When the records do not answer, the tool falls back to the rendered lists with `source: "page"` (every list one at a time when no `list_name` is given) and says which fields it could not read.
 </details>
 
 <details>

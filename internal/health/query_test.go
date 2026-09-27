@@ -655,3 +655,34 @@ func TestHeartRateIgnoresDerivedSeries(t *testing.T) {
 		t.Fatalf("hr resolves to %q, want HeartRate alone", got)
 	}
 }
+
+// TestSleepKeepsNapApartFromNight pins the box's 2026-09-26 reading: a
+// night whose onset is after midnight and an afternoon nap the same day
+// both carry that date, as two entries. The nap is never merged into the
+// night; the shared date is the onset's local date.
+func TestSleepKeepsNapApartFromNight(t *testing.T) {
+	db, dbPath := testDB(t)
+	root := t.TempDir()
+	seg := func(id, start, end, day string) string {
+		return `{"uuid":"` + id + `","metric":"SleepAnalysis","recordType":"c","start":"` + start + `","end":"` + end + `","localDate":"` + day + `","timezone":"Europe/Berlin","value":{"code":3,"label":"core sleep","type":"category"},"unit":"","source":"s","sourceBundleId":"b","device":"d","wasUserEntered":false,"recordedAt":"2026-09-26T16:00:00+02:00","schemaVersion":1}` + "\n"
+	}
+	writeFile(t, filepath.Join(root, "SleepAnalysis", "2026-09.jsonl"),
+		seg("n1", "2026-09-26T00:40:00+02:00", "2026-09-26T03:00:00+02:00", "2026-09-26")+
+			seg("n2", "2026-09-26T03:10:00+02:00", "2026-09-26T07:10:00+02:00", "2026-09-26")+
+			seg("p1", "2026-09-26T14:30:00+02:00", "2026-09-26T15:10:00+02:00", "2026-09-26"))
+	if _, err := ImportDir(db, root, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	nights := Sleep(fixtureConfig(t, dbPath), windowSince(t, "2026-09-01"))["nights"].([]map[string]any)
+	if len(nights) != 2 {
+		t.Fatalf("nights = %v, want the night and the nap apart", nights)
+	}
+	nap, night := nights[0], nights[1]
+	if nap["segments"] != 1 || nap["total_minutes"] != 40.0 || night["segments"] != 2 || night["total_minutes"] != 380.0 {
+		t.Fatalf("nap = %v, night = %v", nap, night)
+	}
+	if nap["night"] != "2026-09-26" || night["night"] != "2026-09-26" {
+		t.Fatalf("dates = %v, %v, want both the onset date", nap["night"], night["night"])
+	}
+}

@@ -161,6 +161,8 @@ type FileResult struct {
 	Seen    int
 	New     int
 	Updated int
+	// Deleted counts stored samples a tombstone file removed.
+	Deleted int
 }
 
 // ImportDir imports every monthly file under root/<metric>/ plus
@@ -273,7 +275,7 @@ func ImportDir(db *sql.DB, root string, now time.Time) ([]FileResult, error) {
 		if err != nil {
 			return out, err
 		}
-		seen, fresh, refreshed, ferr := importFile(tx, f.path, f.metric, f.tomb)
+		seen, fresh, refreshed, deleted, ferr := importFile(tx, f.path, f.metric, f.tomb)
 		if ferr != nil {
 			_ = tx.Rollback()
 			return out, fmt.Errorf("%s: %w", f.path, ferr)
@@ -287,7 +289,7 @@ func ImportDir(db *sql.DB, root string, now time.Time) ([]FileResult, error) {
 		if err := tx.Commit(); err != nil {
 			return out, err
 		}
-		out = append(out, FileResult{File: rel, Metric: f.metric, Seen: seen, New: fresh, Updated: refreshed})
+		out = append(out, FileResult{File: rel, Metric: f.metric, Seen: seen, New: fresh, Updated: refreshed, Deleted: deleted})
 	}
 	return out, nil
 }
@@ -310,10 +312,10 @@ func allImportedBefore(db *sql.DB, dirs []string) (bool, error) {
 	return true, nil
 }
 
-func importFile(db storer, path, metric string, tombstones bool) (seen, fresh, refreshed int, err error) {
+func importFile(db storer, path, metric string, tombstones bool) (seen, fresh, refreshed, deleted int, err error) {
 	fh, err := os.Open(path)
 	if err != nil {
-		return 0, 0, 0, err
+		return 0, 0, 0, 0, err
 	}
 	defer fh.Close()
 	scan := bufio.NewScanner(fh)
@@ -324,19 +326,28 @@ func importFile(db storer, path, metric string, tombstones bool) (seen, fresh, r
 			continue
 		}
 		seen++
-		n, u, err := importLine(db, line, metric, tombstones)
+		if tombstones {
+			d, err := importTombstone(db, line)
+			if err != nil {
+				return seen, fresh, refreshed, deleted, fmt.Errorf("line %d: %w", seen, err)
+			}
+			deleted += d
+			continue
+		}
+		n, u, err := importLine(db, line, metric, false)
 		if err != nil {
-			return seen, fresh, refreshed, fmt.Errorf("line %d: %w", seen, err)
+			return seen, fresh, refreshed, deleted, fmt.Errorf("line %d: %w", seen, err)
 		}
 		fresh += n
 		refreshed += u
 	}
-	return seen, fresh, refreshed, scan.Err()
+	return seen, fresh, refreshed, deleted, scan.Err()
 }
 
 func importLine(db storer, line []byte, metric string, tombstones bool) (fresh, refreshed int, err error) {
 	if tombstones {
-		return importTombstone(db, line)
+		_, err := importTombstone(db, line)
+		return 0, 0, err
 	}
 	var r record
 	if err := json.Unmarshal(line, &r); err != nil {
@@ -410,34 +421,34 @@ func importLine(db storer, line []byte, metric string, tombstones bool) (fresh, 
 	return 0, 1, applyPendingTombstone(db, r.UUID)
 }
 
-func importTombstone(db storer, line []byte) (int, int, error) {
+func importTombstone(db storer, line []byte) (deleted int, err error) {
 	var t struct {
 		UUID       string `json:"uuid"`
 		RecordedAt string `json:"recordedAt"`
 	}
 	if err := json.Unmarshal(line, &t); err != nil {
-		return 0, 0, err
+		return 0, err
 	}
 	if t.UUID == "" {
-		return 0, 0, fmt.Errorf("tombstone without uuid")
+		return 0, fmt.Errorf("tombstone without uuid")
 	}
 	if _, err := db.Exec(`INSERT OR IGNORE INTO tombstones(uuid, recorded_at, applied) VALUES(?,?,0)`,
 		t.UUID, t.RecordedAt); err != nil {
-		return 0, 0, err
+		return 0, err
 	}
 	res, err := db.Exec(`DELETE FROM samples WHERE uuid=?`, t.UUID)
 	if err != nil {
-		return 0, 0, err
+		return 0, err
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return 0, 0, err
+		return 0, err
 	}
 	if n > 0 {
 		_, err = db.Exec(`UPDATE tombstones SET applied=1 WHERE uuid=?`, t.UUID)
-		return 0, 0, err
+		return int(n), err
 	}
-	return 0, 0, nil
+	return 0, nil
 }
 
 // tombstoned reports whether a tombstone row names this uuid, marking it

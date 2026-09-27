@@ -852,34 +852,61 @@ func syncFailed(report []map[string]any) bool {
 	return true
 }
 
-// listFromPage is the fallback read of the rendered list: one list, the
-// fields the page shows, and due as the app's relative text.
+// listFromPage is the fallback read of the rendered lists: the chosen
+// list, or every list one at a time when none is named, with the fields
+// the page shows and due as the app's relative text.
 func (c *Client) listFromPage(tab *browser.Tab, listName, why string) (map[string]any, error) {
+	names := []string{listName}
 	if strings.TrimSpace(listName) == "" {
-		return map[string]any{"error": "Apple's reminder records did not answer (" + why + "), and reading the page " +
-			"needs one list at a time: pass list_name (see reminder_lists)."}, nil
-	}
-	if problem := c.openList(tab, listName); problem != "" {
-		return map[string]any{"error": problem}, nil
-	}
-	all, err := c.items(tab)
-	if err != nil {
-		return nil, err
+		all, err := c.lists(tab)
+		if err != nil {
+			return nil, err
+		}
+		names = all
 	}
 	items := []map[string]any{}
-	for _, r := range all {
-		if completed, _ := r["completed"].(bool); !completed {
-			r["list"] = listName
-			r["due_display"] = r["due"]
-			delete(r, "due")
-			items = append(items, r)
+	read := []string{}
+	var skipped []map[string]any
+	for _, name := range names {
+		if problem := c.openList(tab, name); problem != "" {
+			if len(names) == 1 {
+				return map[string]any{"error": problem}, nil
+			}
+			skipped = append(skipped, map[string]any{"list": name, "error": problem})
+			continue
 		}
+		all, err := c.items(tab)
+		if err != nil {
+			if len(names) == 1 {
+				return nil, err
+			}
+			skipped = append(skipped, map[string]any{"list": name, "error": err.Error()})
+			continue
+		}
+		for _, r := range all {
+			if completed, _ := r["completed"].(bool); !completed {
+				r["list"] = name
+				r["due_display"] = r["due"]
+				delete(r, "due")
+				items = append(items, r)
+			}
+		}
+		read = append(read, name)
 	}
-	return map[string]any{"source": "page", "lists": []string{listName}, "count": len(items), "reminders": items,
+	if len(read) == 0 {
+		// Nothing read is not "no open reminders".
+		return map[string]any{"error": "Apple's reminder records did not answer (" + why + "), and no list could be read from the page",
+			"skipped_lists": skipped}, nil
+	}
+	out := map[string]any{"source": "page", "lists": read, "count": len(items), "reminders": items,
 		"unavailable":   []string{"due as ISO", "notes", "created", "modified", "alarms", "recurring"},
 		"records_error": why,
-		"note": "read from the rendered list because Apple's records did not answer: due_display is the " +
-			"app's relative text, and rows the page has not rendered are missing."}, nil
+		"note": "read from the rendered lists because Apple's records did not answer: due_display is the " +
+			"app's relative text, and rows the page has not rendered are missing."}
+	if skipped != nil {
+		out["skipped_lists"] = skipped
+	}
+	return out, nil
 }
 
 // ckTitle decodes a CloudKit TitleDocument: a zlib or gzip stream holding
